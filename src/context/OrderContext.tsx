@@ -44,6 +44,7 @@ export type Order = {
   total:                number;
   status:               OrderStatus;
   metodeBayarCustomer?: string;
+  mayarInvoiceId?:      string; // id invoice Mayar.id (untuk cek status otomatis)
   kurirName?:           string;
   createdAt:            string;
   updatedAt:            string;

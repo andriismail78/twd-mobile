@@ -20,6 +20,7 @@ import {
   View,
 } from "react-native";
 import { useAuth } from "../context/AuthContext";
+import { useMarketing } from "../context/MarketingContext";
 import { useProducts } from "../context/ProductsContext";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -231,6 +232,7 @@ export default function KasirScreen({
 }: KasirScreenProps) {
 
   const { user, logout } = useAuth();
+  const { updateOwnerTransaksi } = useMarketing();
   const { addTransaksi } = useProducts();
 
   // ── Resolve identitas ─────────────────────────────────────────────────
@@ -605,6 +607,11 @@ export default function KasirScreen({
     };
     await saveTxRecord(tx);
 
+    // ✅ PENTING: picu update totalTransaksi owner di jaringan marketing.
+    // Ini dasar perhitungan komisi layanan (3% × Rp 1.000/trx = Rp 30/trx) &
+    // agar laporan komisi marketing akurat. No-op bila owner tak ada di jaringan.
+    try { updateOwnerTransaksi(resolvedOwnerId, 1); } catch {}
+
     setLastTx(tx);
     clearCart();
     await loadProducts();
@@ -770,6 +777,11 @@ export default function KasirScreen({
     tanggal:      now.toISOString().slice(0, 10),
   };
   await saveTxRecord(tx);
+
+  // ✅ PENTING: picu update totalTransaksi owner saat pesanan online diselesaikan
+  // (sama seperti transaksi kasir — dasar komisi layanan marketing 3%).
+  try { updateOwnerTransaksi(resolvedOwnerId, 1); } catch {}
+
   await loadRecentTx();
   await loadProducts();
 

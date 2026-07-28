@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   RefreshControl,
   ScrollView,
@@ -9,6 +9,7 @@ import {
 import { Card, Divider, Text } from "react-native-paper";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { CustomerSession, useOrders } from "../../context/OrderContext";
+import { checkInvoiceStatus } from "../../utils/MayarService";
 
 const GREEN = "#2E7D32";
 
@@ -53,10 +54,37 @@ type Props = {
 };
 
 export default function CustomerOrderStatusScreen({ session }: Props) {
-  const { orders }  = useOrders();
+  const { orders, updateOrderStatus } = useOrders();
   const insets      = useSafeAreaInsets();
   const [refreshing,  setRefreshing]  = useState(false);
   const [expandedId,  setExpandedId]  = useState<string | null>(null);
+  const [checking,    setChecking]     = useState(false);
+
+  // ✅ Polling status Mayar.id: cek invoice tiap 10 detik untuk order "menunggu"
+  // ber-metode mayar, lalu update status otomatis tanpa menunggu kasir.
+  useEffect(() => {
+    const timer = setInterval(async () => {
+      const pending = orders.find(
+        (o) => o.status === "menunggu" && o.metodeBayarCustomer === "mayar" && o.mayarInvoiceId,
+      );
+      if (!pending) return;
+      try {
+        setChecking(true);
+        const resp = await checkInvoiceStatus(pending.mayarInvoiceId as string);
+        const st = resp?.data?.status?.toLowerCase();
+        if (st === "paid") {
+          updateOrderStatus(pending.id, "dikonfirmasi");
+        } else if (st === "expired" || st === "closed") {
+          updateOrderStatus(pending.id, "dibatalkan");
+        }
+      } catch {
+        // abaikan error jaringan saat polling
+      } finally {
+        setChecking(false);
+      }
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [orders, updateOrderStatus]);
 
   const myOrders = orders
     .filter(o => o.customerPhone === session.phone)
@@ -211,10 +239,18 @@ export default function CustomerOrderStatusScreen({ session }: Props) {
                 {order.status === "menunggu" && (
                   <View style={S.waitingBox}>
                     <Text style={S.waitingIcon}>⏳</Text>
-                    <Text style={S.waitingText}>
-                      Pembayaran Anda sedang diverifikasi oleh kasir.
-                      Mohon tunggu konfirmasi.
-                    </Text>
+                    <View style={S.waitingTextBox}>
+                      <Text style={S.waitingText}>
+                        {order.metodeBayarCustomer === "mayar"
+                          ? "Status pembayaran Mayar.id diperiksa otomatis."
+                          : "Pembayaran Anda sedang diverifikasi oleh kasir. Mohon tunggu konfirmasi."}
+                      </Text>
+                      {order.metodeBayarCustomer === "mayar" && (
+                        <Text style={S.waitingSub}>
+                          {checking ? "Mengecek ke Mayar…" : "Akan otomatis terkonfirmasi saat lunas."}
+                        </Text>
+                      )}
+                    </View>
                   </View>
                 )}
 
@@ -329,6 +365,8 @@ const S = StyleSheet.create({
   waitingBox:         { flexDirection: "row", alignItems: "flex-start", backgroundColor: "#FFF9C4", borderRadius: 10, padding: 12, marginTop: 8, gap: 8 },
   waitingIcon:        { fontSize: 18 },
   waitingText:        { fontSize: 12, color: "#795548", lineHeight: 18, flex: 1 },
+  waitingTextBox:     { flex: 1 },
+  waitingSub:         { fontSize: 11, color: "#9E9E9E", marginTop: 2 },
 
   // Detail expand
   divider:            { marginVertical: 10 },

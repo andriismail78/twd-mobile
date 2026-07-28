@@ -5,8 +5,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   ScrollView,
+  Share,
   StyleSheet,
   TouchableOpacity,
   View,
@@ -23,19 +25,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "../../context/AuthContext";
 import { CustomerSession, useOrders } from "../../context/OrderContext";
 import { usePaymentMethods } from "../../context/PaymentMethodContext";
-import { createVirtualAccount } from "../../utils/DokuService"; // ✅ FIX: path diperbaiki
+import { createInvoice } from "../../utils/MayarService";
 
 const GREEN         = "#2E7D32";
 const BIAYA_LAYANAN = 1_000;
-
-// Pilihan bank untuk DOKU Virtual Account
-const DOKU_BANKS: { id: "BCA" | "BNI" | "BRI" | "MANDIRI" | "PERMATA"; label: string; icon: string }[] = [
-  { id: "BCA",     label: "BCA",     icon: "🏦" },
-  { id: "BNI",     label: "BNI",     icon: "🏦" },
-  { id: "BRI",     label: "BRI",     icon: "🏦" },
-  { id: "MANDIRI", label: "Mandiri", icon: "🏦" },
-  { id: "PERMATA", label: "Permata", icon: "🏦" },
-];
 
 type CartItem = {
   productId: string;
@@ -51,11 +44,11 @@ type Props = {
 
 type CheckoutStep = "cart" | "form" | "bayar_method" | "instruksi_bayar";
 
-// Hasil VA dari DOKU
-type DokuVaResult = {
-  vaNumber:    string;
-  bank:        string;
-  expiredTime: string; // ISO string
+// Hasil dari Mayar.id (link pembayaran)
+type MayarResult = {
+  link:      string; // URL halaman pembayaran pelanggan
+  invoiceId: string;
+  expiredAt?: number; // epoch ms (opsional)
 };
 
 // Helper: ambil harga produk dari field manapun yang tersedia
@@ -111,10 +104,9 @@ export default function CustomerCartScreen({ session, onCheckoutDone }: Props) {
   const [metodeBayar,     setMetodeBayar]    = useState<string>("");
   const [loading,         setLoading]        = useState(false);
 
-  // ✅ State khusus DOKU
-  const [selectedDokuBank, setSelectedDokuBank] = useState<"BCA" | "BNI" | "BRI" | "MANDIRI" | "PERMATA" | "">("");
-  const [dokuVaResult,     setDokuVaResult]     = useState<DokuVaResult | null>(null);
-  const [dokuError,        setDokuError]        = useState<string>("");
+  // ✅ State khusus Mayar.id
+  const [mayarResult, setMayarResult] = useState<MayarResult | null>(null);
+  const [mayarError,  setMayarError]  = useState<string>("");
 
   // Metode manual dari PaymentMethodContext (transfer manual & qris)
   const bayarOptions = useMemo(
@@ -154,53 +146,47 @@ export default function CustomerCartScreen({ session, onCheckoutDone }: Props) {
   // ✅ Validasi sebelum lanjut ke pembayaran
   const canProceedToBayar = useMemo(() => {
     if (!metodeBayar) return false;
-    if (metodeBayar === "doku_va" && !selectedDokuBank) return false;
     return true;
-  }, [metodeBayar, selectedDokuBank]);
+  }, [metodeBayar]);
 
-  // ✅ Handler utama: buat pesanan + panggil DOKU jika perlu
+  // ✅ Handler utama: buat pesanan + panggil Mayar jika perlu
   const handleBuatPesanan = async () => {
     if (!alamat.trim()) {
       Alert.alert("Alamat Kosong", "Masukkan alamat pengiriman.");
       return;
     }
     setLoading(true);
-    setDokuError("");
+    setMayarError("");
 
     try {
-      // ── Jika metode DOKU Virtual Account ──────────────────────────
-      if (metodeBayar === "doku_va" && selectedDokuBank) {
+      // ── Jika metode Mayar.id (link pembayaran) ──────────────────────
+      if (metodeBayar === "mayar") {
         const orderId = `TWD-${Date.now()}`;
-        let vaResult: DokuVaResult | null = null;
-
         try {
-          const dokuResp = await createVirtualAccount({
+          const mayarResp = await createInvoice({
             orderId,
             amount:        totalAkhir,
             customerName:  nama.trim(),
             customerEmail: (session as any).email ?? "customer@twd.com",
-            bank:          selectedDokuBank,
-            expiredTime:   60, // 60 menit
+            customerPhone: telepon.trim(),
+            description:   `Pesanan ${orderId} - ${nama.trim()}`,
+            expiredAt:     new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+            items:         cartItems.map(it => ({
+              quantity:    it.qty,
+              rate:        it.price,
+              description: it.name,
+            })),
           });
 
-          // Ambil nomor VA dari response DOKU
-          const vaNumber = dokuResp?.virtual_account_info?.virtual_account_number
-                        ?? dokuResp?.payment?.virtual_account_info?.virtual_account_number
-                        ?? "";
-
-          const expiredAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-
-          vaResult = {
-            vaNumber:    vaNumber,
-            bank:        selectedDokuBank,
-            expiredTime: expiredAt,
-          };
-          setDokuVaResult(vaResult);
-        } catch (dokuErr: any) {
-          // Jika DOKU gagal (sandbox/konfigurasi belum siap), tetap buat pesanan
-          // tapi tampilkan warning
-          console.warn("DOKU VA gagal:", dokuErr?.message);
-          setDokuError("Gagal membuat Virtual Account otomatis. Hubungi toko untuk nomor rekening manual.");
+          setMayarResult({
+            link:      mayarResp?.data?.link ?? "",
+            invoiceId: mayarResp?.data?.id   ?? "",
+            expiredAt: mayarResp?.data?.expiredAt,
+          });
+        } catch (mayarErr: any) {
+          // Jika Mayar gagal (sandbox/kunci API belum siap), tetap buat pesanan
+          console.warn("Mayar invoice gagal:", mayarErr?.message);
+          setMayarError("Gagal membuat link pembayaran otomatis. Hubungi toko untuk instruksi pembayaran manual.");
         }
       }
 
@@ -222,6 +208,7 @@ export default function CustomerCartScreen({ session, onCheckoutDone }: Props) {
         total:               totalAkhir,
         status:              "menunggu",
         metodeBayarCustomer: metodeBayar,
+        mayarInvoiceId:      metodeBayar === "mayar" && mayarResult ? mayarResult.invoiceId : undefined,
       });
 
       setStep("instruksi_bayar");
@@ -426,22 +413,22 @@ export default function CustomerCartScreen({ session, onCheckoutDone }: Props) {
             </Card.Content>
           </Card>
 
-          {/* ✅ Opsi DOKU Virtual Account */}
+          {/* ✅ Opsi Mayar.id (Link Pembayaran) */}
           {(() => {
-            const isActive = metodeBayar === "doku_va";
+            const isActive = metodeBayar === "mayar";
             return (
-              <TouchableOpacity onPress={() => { setMetodeBayar("doku_va"); setSelectedDokuBank(""); }}>
+              <TouchableOpacity onPress={() => { setMetodeBayar("mayar"); }}>
                 <Card style={[S.methodCard, isActive && S.methodCardActive]} mode="outlined">
                   <Card.Content>
                     <View style={S.methodRow}>
                       <View style={S.methodLeft}>
-                        <Text style={S.methodIcon}>🏦</Text>
+                        <Text style={S.methodIcon}>💳</Text>
                         <View style={S.methodLabelBox}>
                           <Text style={[S.methodLabel, isActive && S.methodLabelActive]}>
-                            Virtual Account (DOKU)
+                            Mayar.id (Link Pembayaran)
                           </Text>
                           <Text style={S.methodDetail}>
-                            BCA, BNI, BRI, Mandiri, Permata — otomatis
+                            VA, e-wallet & QRIS — otomatis dari 1 link
                           </Text>
                         </View>
                       </View>
@@ -449,34 +436,6 @@ export default function CustomerCartScreen({ session, onCheckoutDone }: Props) {
                         {isActive && <View style={S.radioInner} />}
                       </View>
                     </View>
-
-                    {/* ✅ Bank selector muncul jika doku_va dipilih */}
-                    {isActive && (
-                      <View style={S.bankSelectorBox}>
-                        <Text style={S.bankSelectorLabel}>Pilih Bank:</Text>
-                        <View style={S.bankGrid}>
-                          {DOKU_BANKS.map(bank => {
-                            const isBankActive = selectedDokuBank === bank.id;
-                            return (
-                              <TouchableOpacity
-                                key={bank.id}
-                                style={[S.bankChip, isBankActive && S.bankChipActive]}
-                                onPress={() => setSelectedDokuBank(bank.id)}
-                              >
-                                <Text style={[S.bankChipText, isBankActive && S.bankChipTextActive]}>
-                                  {bank.label}
-                                </Text>
-                              </TouchableOpacity>
-                            );
-                          })}
-                        </View>
-                        {selectedDokuBank !== "" && (
-                          <Text style={S.bankSelectedInfo}>
-                            ✅ Nomor VA {selectedDokuBank} akan dibuat otomatis setelah klik "Buat Pesanan"
-                          </Text>
-                        )}
-                      </View>
-                    )}
                   </Card.Content>
                 </Card>
               </TouchableOpacity>
@@ -484,7 +443,7 @@ export default function CustomerCartScreen({ session, onCheckoutDone }: Props) {
           })()}
 
           {/* Metode manual dari PaymentMethodContext */}
-          {bayarOptions.length === 0 && metodeBayar !== "doku_va" ? (
+          {bayarOptions.length === 0 && metodeBayar !== "mayar" ? (
             <Card style={S.infoCard} mode="outlined">
               <Card.Content>
                 <Text style={S.noMethodText}>
@@ -582,49 +541,55 @@ export default function CustomerCartScreen({ session, onCheckoutDone }: Props) {
           </Card.Content>
         </Card>
 
-        {/* ✅ Instruksi DOKU Virtual Account */}
-        {metodeBayar === "doku_va" && (
+        {/* ✅ Instruksi Mayar.id (Link Pembayaran) */}
+        {metodeBayar === "mayar" && (
           <Card style={S.instruksiCard} mode="outlined">
             <Card.Content>
-              <Text style={S.instruksiMethodTitle}>🏦 Virtual Account {selectedDokuBank}</Text>
-              {dokuError !== "" && (
+              <Text style={S.instruksiMethodTitle}>💳 Mayar.id</Text>
+              {mayarError !== "" && (
                 <View style={S.dokuErrorBox}>
-                  <Text style={S.dokuErrorText}>⚠️ {dokuError}</Text>
+                  <Text style={S.dokuErrorText}>⚠️ {mayarError}</Text>
                 </View>
               )}
-              {dokuVaResult && dokuVaResult.vaNumber !== "" ? (
+              {mayarResult && mayarResult.link !== "" ? (
                 <View>
-                  <Text style={S.instruksiRow}>Bank: {dokuVaResult.bank}</Text>
-                  <View style={S.instruksiAccBox}>
-                    <Text style={S.instruksiAccLabel}>Nomor Virtual Account</Text>
-                    <Text style={S.instruksiAccNum}>{dokuVaResult.vaNumber}</Text>
-                  </View>
+                  <Text style={S.instruksiRow}>
+                    Klik tombol di bawah untuk membuka halaman pembayaran Mayar.id.
+                  </Text>
+                  <TouchableOpacity
+                    style={S.mayarLinkBtn}
+                    onPress={() => { if (mayarResult?.link) Linking.openURL(mayarResult.link); }}
+                  >
+                    <Text style={S.mayarLinkBtnText}>🔗 Buka Link Pembayaran</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={S.mayarShareBtn}
+                    onPress={() => { if (mayarResult?.link) Share.share({ message: `Link pembayaran TWD: ${mayarResult.link}` }); }}
+                  >
+                    <Text style={S.mayarShareBtnText}>📤 Bagikan Link</Text>
+                  </TouchableOpacity>
                   <Text style={S.instruksiExpiry}>
-                    ⏰ Berlaku hingga: {new Date(dokuVaResult.expiredTime).toLocaleString("id-ID")}
+                    ⏰ Selesaikan pembayaran dalam 60 menit.
                   </Text>
                   <Divider style={S.divider} />
                   <Text style={S.instruksiStep}>Langkah pembayaran:</Text>
-                  <Text style={S.instruksiStepItem}>1. Buka m-Banking / ATM {dokuVaResult.bank}</Text>
-                  <Text style={S.instruksiStepItem}>2. Pilih menu Transfer / Bayar Virtual Account</Text>
+                  <Text style={S.instruksiStepItem}>1. Buka link pembayaran Mayar.id</Text>
+                  <Text style={S.instruksiStepItem}>2. Pilih metode (VA / e-wallet / QRIS)</Text>
                   <Text style={S.instruksiStepItem}>
-                    {"3. Masukkan nomor VA: " + dokuVaResult.vaNumber}
+                    {"3. Bayar Rp " + totalAkhir.toLocaleString("id-ID")}
                   </Text>
-                  <Text style={S.instruksiStepItem}>
-                    {"4. Konfirmasi nominal Rp " + totalAkhir.toLocaleString("id-ID")}
-                  </Text>
-                  <Text style={S.instruksiStepItem}>5. Simpan bukti pembayaran</Text>
-                  <Text style={S.instruksiStepItem}>6. Kasir akan otomatis menerima konfirmasi</Text>
+                  <Text style={S.instruksiStepItem}>4. Kasir akan otomatis menerima konfirmasi</Text>
                 </View>
               ) : (
                 <View>
                   <Text style={S.instruksiRow}>
-                    Nomor VA akan segera tersedia. Jika belum muncul, hubungi toko.
+                    Link pembayaran akan segera tersedia. Jika belum muncul, hubungi toko.
                   </Text>
                   <Divider style={S.divider} />
                   <Text style={S.instruksiStep}>Langkah pembayaran:</Text>
-                  <Text style={S.instruksiStepItem}>1. Tunggu nomor VA dari toko via WhatsApp</Text>
+                  <Text style={S.instruksiStepItem}>1. Tunggu link dari toko via WhatsApp</Text>
                   <Text style={S.instruksiStepItem}>
-                    {"2. Transfer Rp " + totalAkhir.toLocaleString("id-ID") + " ke nomor VA yang diberikan"}
+                    {"2. Transfer Rp " + totalAkhir.toLocaleString("id-ID") + " ke rekening toko"}
                   </Text>
                   <Text style={S.instruksiStepItem}>3. Simpan bukti transfer</Text>
                 </View>
@@ -755,7 +720,7 @@ const S = StyleSheet.create({
   methodDetailText:     { fontSize: 13, color: "#2E7D32", fontWeight: "600" },
   methodAccNum:         { fontSize: 20, fontWeight: "900", color: "#1B5E20", letterSpacing: 2, marginVertical: 6 },
   methodNote:           { fontSize: 11, color: "#888", marginTop: 4 },
-  // ✅ Styles baru untuk DOKU bank selector
+  // ✅ Styles untuk pemilih metode bayar
   bankSelectorBox:      { backgroundColor: "#E8F5E9", borderRadius: 10, padding: 12, marginTop: 10 },
   bankSelectorLabel:    { fontSize: 12, fontWeight: "700", color: "#1B5E20", marginBottom: 8 },
   bankGrid:             { flexDirection: "row", flexWrap: "wrap", gap: 8 },
@@ -764,11 +729,16 @@ const S = StyleSheet.create({
   bankChipText:         { fontSize: 13, fontWeight: "700", color: "#2E7D32" },
   bankChipTextActive:   { color: "#FFF" },
   bankSelectedInfo:     { fontSize: 11, color: "#388E3C", marginTop: 8, fontStyle: "italic" },
-  // ✅ Styles baru untuk instruksi DOKU
+  // ✅ Styles untuk instruksi pembayaran
   instruksiAccLabel:    { fontSize: 11, color: "#888", marginBottom: 4 },
   instruksiExpiry:      { fontSize: 11, color: "#E65100", marginTop: 4, marginBottom: 4 },
   dokuErrorBox:         { backgroundColor: "#FFF3E0", borderRadius: 8, padding: 10, marginBottom: 10 },
   dokuErrorText:        { fontSize: 12, color: "#E65100", lineHeight: 18 },
+  // ✅ Styles untuk tombol link Mayar.id
+  mayarLinkBtn:         { backgroundColor: "#2E7D32", borderRadius: 10, paddingVertical: 12, alignItems: "center", marginTop: 10 },
+  mayarLinkBtnText:     { color: "#FFF", fontWeight: "800", fontSize: 14 },
+  mayarShareBtn:        { backgroundColor: "#E8F5E9", borderRadius: 10, paddingVertical: 12, alignItems: "center", marginTop: 8, borderWidth: 1, borderColor: "#A5D6A7" },
+  mayarShareBtnText:    { color: "#2E7D32", fontWeight: "700", fontSize: 14 },
   // Existing styles
   footer:               { padding: 16, backgroundColor: "#FFF", borderTopWidth: 1, borderTopColor: "#E1EEE1" },
   footerSummary:        { flexDirection: "row", justifyContent: "space-between", marginBottom: 10 },

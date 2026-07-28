@@ -18,7 +18,6 @@
       },
       "predictiveBackGestureEnabled": false,
       "permissions": [
-        "android.permission.CAMERA",
         "android.permission.CAMERA"
       ],
       "package": "com.anonymous.twdmobile"
@@ -39,10 +38,9 @@
           "dark": {
             "backgroundColor": "#000000"
           }
-        }
-      ],
-      "expo-barcode-scanner"
-    ],
+      }
+    ]
+  ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
