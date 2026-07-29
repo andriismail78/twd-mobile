@@ -1,0 +1,18 @@
+{
+  "name": "twd-mobile-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend untuk TWD Mobile: penyimpanan order + webhook status Mayar.id. Didesain untuk di-deploy ke KVM (srv1808009.hstgr.cloud / 62.72.20.24) di balik nginx + domain tokowarungdigital.com",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
