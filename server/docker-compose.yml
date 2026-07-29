@@ -1,0 +1,13 @@
+services:
+  twd-backend:
+    build: .
+    container_name: twd-backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - MAYAR_WEBHOOK_TOKEN=${MAYAR_WEBHOOK_TOKEN}
+    volumes:
+      # persistensi data order antar-restart container
+      - ./data:/app/data
