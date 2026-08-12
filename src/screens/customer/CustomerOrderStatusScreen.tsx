@@ -2,12 +2,14 @@ import React, { useState } from "react";
 import {
   RefreshControl,
   ScrollView,
+  Share,
   StyleSheet,
   TouchableOpacity,
   View,
 } from "react-native";
 import { Card, Divider, Text } from "react-native-paper";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import TwdLogoBadge from "../../components/TwdLogoBadge";
 import { CustomerSession, useOrders } from "../../context/OrderContext";
 
 const GREEN = "#2E7D32";
@@ -74,6 +76,39 @@ export default function CustomerOrderStatusScreen({ session }: Props) {
       " " +
       d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })
     );
+  };
+
+  const handleShareBonCustomer = async (order: any) => {
+    const tokoStr = order.namaToko || "Toko #" + order.ownerId.slice(-4);
+    const lines = [
+      "==================================",
+      "       TWD-MOBILE BON RESMI       ",
+      "      TOKO WARUNG DIGITAL         ",
+      "==================================",
+      "Toko       : " + tokoStr,
+      "No. Bon    : #" + order.id.slice(-8).toUpperCase(),
+      "Tanggal    : " + formatDate(order.createdAt),
+      "Customer   : " + order.customerName,
+      "Metode     : " + (order.metodeBayarCustomer === "mayar" ? "ONLINE (mayar.id)" : (order.metodeBayarCustomer || "ONLINE").toUpperCase()),
+      "----------------------------------",
+      ...order.items.map((i: any) => `${i.name} (${i.qty}x) - Rp ${(i.qty * i.price).toLocaleString("id-ID")}`),
+      "----------------------------------",
+      "Subtotal   : Rp " + order.subtotal.toLocaleString("id-ID"),
+      "B. Layanan : Rp " + (order.biayaLayanan || 0).toLocaleString("id-ID"),
+      "TOTAL      : Rp " + order.total.toLocaleString("id-ID"),
+      "==================================",
+      "✅ STATUS  : LUNAS TERVERIFIKASI",
+      "Alamat     : " + order.alamat,
+      "==================================",
+      "Terima kasih telah berbelanja!",
+      "Powered by TWD-Mobile",
+    ];
+    try {
+      await Share.share({
+        message: lines.join("\n"),
+        title: "Bon Pembayaran " + tokoStr,
+      });
+    } catch {}
   };
 
   const scrollPad = { paddingBottom: insets.bottom + 24 };
@@ -218,42 +253,119 @@ export default function CustomerOrderStatusScreen({ session }: Props) {
                   </View>
                 )}
 
-                {/* ── Detail pesanan (expandable) ── */}
+                {/* ── Bon Pembayaran Resmi Customer (Electronic Receipt) ── */}
                 {isExpanded && (
-                  <View>
-                    <Divider style={S.divider} />
-                    <Text style={S.detailTitle}>Detail Produk</Text>
-                    {order.items.map(item => (
-                      <View key={item.productId} style={S.itemRow}>
-                        <Text style={S.itemName}>{item.name}</Text>
-                        <Text style={S.itemDetail}>
-                          {item.qty + " x Rp " + item.price.toLocaleString("id-ID")}
+                  <View style={S.bonReceiptBox}>
+                    <View style={S.bonHeader}>
+                      <TwdLogoBadge size="small" showSubtitle={false} />
+                      <Text style={S.bonAppTitle}>TWD-MOBILE</Text>
+                      <Text style={S.bonAppSub}>TOKO WARUNG DIGITAL — BON PEMBAYARAN</Text>
+                      <View style={S.bonTokoStrip}>
+                        <Text style={S.bonTokoName}>
+                          {"🏪 " + (order.namaToko || "Toko #" + order.ownerId.slice(-4))}
                         </Text>
-                        <Text style={S.itemTotal}>
-                          {"Rp " + (item.qty * item.price).toLocaleString("id-ID")}
+                        <Text style={S.bonTokoCode}>
+                          {"Kode Toko: TWD-" + order.ownerId.slice(-6).toUpperCase()}
                         </Text>
                       </View>
-                    ))}
-                    <Divider style={S.divider} />
+                    </View>
+
+                    <Divider style={S.bonDivider} />
+
+                    <View style={S.bonMetaRow}>
+                      <View>
+                        <Text style={S.bonMetaLbl}>NO. BON</Text>
+                        <Text style={S.bonMetaVal}>{"#" + order.id.slice(-8).toUpperCase()}</Text>
+                      </View>
+                      <View style={{ alignItems: "flex-end" }}>
+                        <Text style={S.bonMetaLbl}>WAKTU TRANSAKSI</Text>
+                        <Text style={S.bonMetaVal}>{formatDate(order.createdAt)}</Text>
+                      </View>
+                    </View>
+                    <View style={S.bonMetaRow}>
+                      <View>
+                        <Text style={S.bonMetaLbl}>CUSTOMER</Text>
+                        <Text style={S.bonMetaVal}>{order.customerName}</Text>
+                      </View>
+                      <View style={{ alignItems: "flex-end" }}>
+                        <Text style={S.bonMetaLbl}>METODE BAYAR</Text>
+                        <View style={S.bonMetodeChip}>
+                          <Text style={S.bonMetodeTxt}>
+                            {order.metodeBayarCustomer === "mayar"
+                              ? "⚡ ONLINE (mayar.id)"
+                              : (order.metodeBayarCustomer || "ONLINE").toUpperCase()}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    <Divider style={S.bonDivider} />
+
+                    <Text style={S.bonSectionTitle}>RINCIAN PESANAN</Text>
+                    <View style={S.bonTable}>
+                      {order.items.map(item => (
+                        <View key={item.productId} style={S.bonTableRow}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={S.bonItemName}>{item.name}</Text>
+                            <Text style={S.bonItemQty}>
+                              {item.qty + " × Rp " + item.price.toLocaleString("id-ID")}
+                            </Text>
+                          </View>
+                          <Text style={S.bonItemSubtotal}>
+                            {"Rp " + (item.qty * item.price).toLocaleString("id-ID")}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+
+                    <Divider style={S.bonDivider} />
+
+                    <View style={S.bonSumRow}>
+                      <Text style={S.bonSumLbl}>Subtotal Produk</Text>
+                      <Text style={S.bonSumVal}>
+                        {"Rp " + order.subtotal.toLocaleString("id-ID")}
+                      </Text>
+                    </View>
                     {order.biayaLayanan > 0 && (
-                      <View style={S.summaryRow}>
-                        <Text style={S.summaryLabel}>Biaya Layanan</Text>
-                        <Text style={S.summaryValue}>
+                      <View style={S.bonSumRow}>
+                        <Text style={S.bonSumLbl}>Biaya Layanan TWD</Text>
+                        <Text style={S.bonSumVal}>
                           {"Rp " + order.biayaLayanan.toLocaleString("id-ID")}
                         </Text>
                       </View>
                     )}
-                    <View style={S.summaryRow}>
-                      <Text style={[S.summaryLabel, S.totalLabelStyle]}>Total Bayar</Text>
-                      <Text style={S.totalValueStyle}>
-                        {"Rp " + order.total.toLocaleString("id-ID")}
+
+                    <View style={S.bonGrandTotalBox}>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                        <Text style={S.bonGrandTotalLbl}>TOTAL DIBAYAR</Text>
+                        <Text style={S.bonGrandTotalVal}>
+                          {"Rp " + order.total.toLocaleString("id-ID")}
+                        </Text>
+                      </View>
+                      <Text style={S.bonStatusLunas}>
+                        {"✅ LUNAS TERVERIFIKASI (" + (order.metodeBayarCustomer === "mayar" ? "MAYAR.ID" : "TOKO") + ")"}
                       </Text>
                     </View>
-                    <Divider style={S.divider} />
-                    <Text style={S.infoSmall}>📍 {order.alamat}</Text>
-                    {order.catatan
-                      ? <Text style={S.infoSmallCatatan}>📝 {order.catatan}</Text>
-                      : null}
+
+                    <View style={S.bonAddressBox}>
+                      <Text style={S.bonAddressLbl}>📍 ALAMAT PENGIRIMAN:</Text>
+                      <Text style={S.bonAddressTxt}>{order.alamat}</Text>
+                      {order.catatan ? (
+                        <Text style={S.bonNoteTxt}>{"📝 Catatan: " + order.catatan}</Text>
+                      ) : null}
+                    </View>
+
+                    <View style={S.bonFooter}>
+                      <Text style={S.bonFooterGreet}>Terima kasih telah berbelanja di toko kami! 🙏</Text>
+                      <Text style={S.bonFooterPowered}>Powered by TWD-Mobile — Toko Warung Digital</Text>
+                    </View>
+
+                    <TouchableOpacity
+                      style={S.bonShareBtn}
+                      onPress={() => handleShareBonCustomer(order)}
+                    >
+                      <Text style={S.bonShareBtnTxt}>{"📤 Bagikan / Simpan Bon Pembayaran (WhatsApp)"}</Text>
+                    </TouchableOpacity>
                   </View>
                 )}
 
@@ -344,6 +456,42 @@ const S = StyleSheet.create({
   totalValueStyle:    { fontSize: 15, fontWeight: "900", color: GREEN },
   infoSmall:          { fontSize: 12, color: "#555", marginTop: 4 },
   infoSmallCatatan:   { fontSize: 11, color: "#888", fontStyle: "italic", marginTop: 2 },
+
+  bonReceiptBox:      { backgroundColor: "#FFF", borderRadius: 16, padding: 16, marginTop: 12, borderWidth: 1.5, borderColor: "#2E7D32" },
+  bonHeader:          { alignItems: "center", marginBottom: 10 },
+  bonAppTitle:        { fontSize: 18, fontWeight: "900", color: "#0F172A", letterSpacing: 1, marginTop: 4 },
+  bonAppSub:          { fontSize: 10, fontWeight: "800", color: "#0284C7", letterSpacing: 0.5, marginTop: 2 },
+  bonTokoStrip:       { backgroundColor: "#F0FDF4", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, alignItems: "center", marginTop: 10, borderWidth: 1, borderColor: "#BBF7D0", width: "100%" },
+  bonTokoName:        { fontSize: 15, fontWeight: "800", color: "#166534" },
+  bonTokoCode:        { fontSize: 11, fontWeight: "700", color: "#15803D", marginTop: 2 },
+  bonDivider:         { marginVertical: 12, backgroundColor: "#E2E8F0" },
+  bonMetaRow:         { flexDirection: "row", justifyContent: "space-between", marginBottom: 8 },
+  bonMetaLbl:         { fontSize: 9, fontWeight: "700", color: "#64748B", letterSpacing: 0.5 },
+  bonMetaVal:         { fontSize: 13, fontWeight: "800", color: "#1E293B", marginTop: 2 },
+  bonMetodeChip:      { backgroundColor: "#EFF6FF", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, marginTop: 2 },
+  bonMetodeTxt:       { fontSize: 11, fontWeight: "800", color: "#2563EB" },
+  bonSectionTitle:    { fontSize: 11, fontWeight: "800", color: "#1B5E20", marginBottom: 8, letterSpacing: 0.5 },
+  bonTable:           { marginBottom: 4 },
+  bonTableRow:        { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: "#F8FAFC" },
+  bonItemName:        { fontSize: 13, fontWeight: "700", color: "#1E293B" },
+  bonItemQty:         { fontSize: 11, color: "#64748B", marginTop: 2 },
+  bonItemSubtotal:    { fontSize: 13, fontWeight: "800", color: "#1E293B" },
+  bonSumRow:          { flexDirection: "row", justifyContent: "space-between", paddingVertical: 4 },
+  bonSumLbl:          { fontSize: 13, color: "#475569" },
+  bonSumVal:          { fontSize: 13, fontWeight: "700", color: "#1E293B" },
+  bonGrandTotalBox:   { backgroundColor: "#F0FDF4", borderRadius: 12, padding: 12, marginTop: 10, marginBottom: 12, borderWidth: 1, borderColor: "#86EFAC" },
+  bonGrandTotalLbl:   { fontSize: 12, fontWeight: "800", color: "#166534" },
+  bonGrandTotalVal:   { fontSize: 20, fontWeight: "900", color: "#15803D" },
+  bonStatusLunas:     { fontSize: 11, fontWeight: "800", color: "#15803D", textAlign: "center", marginTop: 4 },
+  bonAddressBox:      { backgroundColor: "#F8FAFC", borderRadius: 10, padding: 10, marginBottom: 12 },
+  bonAddressLbl:      { fontSize: 10, fontWeight: "800", color: "#475569", marginBottom: 3 },
+  bonAddressTxt:      { fontSize: 12, color: "#334155", lineHeight: 18 },
+  bonNoteTxt:         { fontSize: 11, color: "#9A3412", marginTop: 4, fontStyle: "italic" },
+  bonFooter:          { alignItems: "center", marginVertical: 8 },
+  bonFooterGreet:     { fontSize: 12, fontWeight: "700", color: "#1E293B" },
+  bonFooterPowered:   { fontSize: 10, color: "#64748B", marginTop: 2 },
+  bonShareBtn:        { backgroundColor: "#2563EB", borderRadius: 12, paddingVertical: 12, alignItems: "center", marginTop: 10, elevation: 1 },
+  bonShareBtnTxt:     { color: "#FFF", fontWeight: "800", fontSize: 13 },
 
   refreshHint:        { textAlign: "center", color: "#CCC", fontSize: 11, marginTop: 12, marginBottom: 8 },
 });

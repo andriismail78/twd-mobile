@@ -15,6 +15,9 @@ import {
   View,
 } from "react-native";
 import { useAuth } from "../context/AuthContext";
+import { useMarketing } from "../context/MarketingContext";
+import { syncUsersWithCloud, deleteFromCloud, registerToCloud } from "../services/CloudSyncService";
+import { subscribeToRealtimeSync } from "../services/SocketService";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type WdRole = "owner" | "kurir" | "marketing" | "sub_marketing";
@@ -57,6 +60,8 @@ interface OwnerRegistration {
   recruitedByRole: string;
   kodeToken: string;
   createdAt: string;
+  kode?: string;
+  expiryDate?: string;
 }
 interface KurirAccount {
   id: string;
@@ -139,6 +144,10 @@ function formatDate(iso: string): string {
 function safeInitial(val?: string | null): string {
   return (val ?? "?").trim().charAt(0).toUpperCase() || "?";
 }
+function safeSlice(str?: string, len = -6, fallback = "USER"): string {
+  if (!str || typeof str !== "string") return fallback;
+  return str.slice(len).toUpperCase();
+}
 function genId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
@@ -151,18 +160,41 @@ interface SuperAdminScreenProps {
 // ─── Komponen Utama ───────────────────────────────────────────────────────────
 export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
   const { logout } = useAuth();
+  const {
+    deleteMarketing,
+    deleteKurir,
+    deleteOwnerRegistration,
+    updateMarketing,
+    updateKurir,
+  } = useMarketing();
 
   const [loading,       setLoading]       = useState(true);
   const [refreshing,    setRefreshing]    = useState(false);
-  const [activeTab,     setActiveTab]     = useState<"dashboard" | "pencairan" | "users" | "daftar">("dashboard");
+  const [activeTab,     setActiveTab]     = useState<"dashboard" | "owner" | "kasir" | "pencairan" | "users" | "daftar">("dashboard");
   const [allWd,         setAllWd]         = useState<WdItem[]>([]);
   const [allUsers,      setAllUsers]      = useState<UserEntry[]>([]);
+  const [ownersList,    setOwnersList]    = useState<OwnerRegistration[]>([]);
+  const [kasirList,     setKasirList]     = useState<any[]>([]);
+  const [totalOmzet,    setTotalOmzet]    = useState(0);
+  const [totalOrders,   setTotalOrders]   = useState(0);
+  const [searchQuery,   setSearchQuery]   = useState("");
+
+  const [detailOwner,   setDetailOwner]   = useState<OwnerRegistration | null>(null);
+  const [showOwnerMod,  setShowOwnerMod]  = useState(false);
   const [filterRole,    setFilterRole]    = useState("semua");
   const [filterStatus,  setFilterStatus]  = useState("menunggu");
   const [selectedWd,    setSelectedWd]    = useState<WdItem | null>(null);
   const [showWdDetail,  setShowWdDetail]  = useState(false);
   const [actionCatatan, setActionCatatan] = useState("");
   const [processing,    setProcessing]    = useState(false);
+
+  // ── State Edit Mitra / User ────────────────────────────────────────────
+  const [selectedUserEdit, setSelectedUserEdit] = useState<UserEntry | null>(null);
+  const [showEditModal,    setShowEditModal]    = useState(false);
+  const [editName,         setEditName]         = useState("");
+  const [editPhone,        setEditPhone]        = useState("");
+  const [editPin,          setEditPin]          = useState("");
+  const [editPaket,        setEditPaket]        = useState<"basic" | "pro" | "enterprise">("basic");
 
   // ── State Registrasi Mitra ─────────────────────────────────────────────
   const [regRole,    setRegRole]    = useState<RegRole>("marketing");
@@ -262,21 +294,48 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
         users.push({ id: k.id, name: k.name ?? "Kurir " + String(k.id).slice(-4), role: "kurir", phone: k.phone });
       }
 
-      // ✅ Load marketing & sub_marketing dari @twd_marketing_accounts
+      // ✅ Load marketing & sub_marketing dari @twd_marketing_accounts dan mkt_data_v1
       const mktRaw = await AsyncStorage.getItem("@twd_marketing_accounts");
       const mktList: any[] = mktRaw ? JSON.parse(mktRaw) : [];
-      for (const m of mktList) {
+      const v1Raw = await AsyncStorage.getItem("mkt_data_v1");
+      const v1: any = v1Raw ? JSON.parse(v1Raw) : {};
+      const v1Mkt: any[] = v1.marketingAccounts || [];
+      const allMkt = [...mktList];
+      for (const vm of v1Mkt) {
+        if (!allMkt.find(x => x.id === vm.id || (x.phone && vm.phone && x.phone === vm.phone))) {
+          allMkt.push(vm);
+        }
+      }
+      for (const m of allMkt) {
         if (m.role === "marketing" || m.role === "sub_marketing") {
-          users.push({ id: m.id, name: m.name ?? "Marketing", role: m.role, phone: m.phone });
+          users.push({ id: m.id, name: m.name ?? "Marketing", role: m.role, phone: m.phone, pin: m.pin || "123456" });
         } else if (m.role === "kurir") {
-          // Kurir dari SuperAdmin — tambahkan jika belum ada
-          if (!users.find((u) => u.id === m.id)) {
-            users.push({ id: m.id, name: m.name ?? "Kurir", role: "kurir", phone: m.phone });
+          if (!users.find((u) => u.id === m.id || (u.phone && m.phone && u.phone === m.phone))) {
+            users.push({ id: m.id, name: m.name ?? "Kurir", role: m.role, phone: m.phone, pin: m.pin || "123456" });
           }
         }
       }
 
-      setAllUsers(users);
+      // Load owners & kasir list
+      setOwnersList(ownerRegs);
+      const kasirRaw = await AsyncStorage.getItem("@twd_kasir_accounts");
+      const kList: any[] = kasirRaw ? JSON.parse(kasirRaw) : [];
+      setKasirList(kList);
+
+      // Load total omzet ekosistem
+      const ordRaw = await AsyncStorage.getItem("@twd_orders");
+      const allOrds: any[] = ordRaw ? JSON.parse(ordRaw) : [];
+      let omzetSum = 0;
+      allOrds.forEach((o) => {
+        if (o && (o.status === "selesai" || o.status === "dikirim" || o.status === "diproses")) {
+          omzetSum += Number(o.total) || 0;
+        }
+      });
+      setTotalOmzet(omzetSum);
+      setTotalOrders(allOrds.length);
+
+      const syncedUsers = await syncUsersWithCloud(users);
+      setAllUsers(syncedUsers);
     } catch (e) {
       console.error("SuperAdmin loadAllData:", e);
     } finally {
@@ -285,8 +344,293 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
     }
   }, []);
 
-  useEffect(() => { loadAllData(); }, [loadAllData]);
+  useEffect(() => {
+    loadAllData();
+    const unsubscribe = subscribeToRealtimeSync((event) => {
+      if (event === "user:sync") {
+        loadAllData();
+      }
+    });
+    return () => unsubscribe();
+  }, [loadAllData]);
   function onRefresh() { setRefreshing(true); loadAllData(); }
+
+  // ── Owner Langganan & Store Management ──────────────────────────────────
+  async function handleUpdatePaketOwner(owner: OwnerRegistration, paketBaru: "basic" | "pro" | "enterprise") {
+    try {
+      const raw = await AsyncStorage.getItem("@twd_owner_registrations");
+      const all: OwnerRegistration[] = raw ? JSON.parse(raw) : [];
+      const upd = all.map((o) => (o.id === owner.id ? { ...o, paket: paketBaru } : o));
+      await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(upd));
+      setDetailOwner((prev) => (prev ? { ...prev, paket: paketBaru } : null));
+      await loadAllData();
+      Alert.alert("Berhasil ✅", `Paket toko ${owner.tokoName} diubah ke ${paketBaru.toUpperCase()}`);
+    } catch {
+      Alert.alert("Error", "Gagal merubah paket.");
+    }
+  }
+
+  async function handlePerpanjangOwner(owner: OwnerRegistration, hari: number) {
+    try {
+      const raw = await AsyncStorage.getItem("@twd_owner_registrations");
+      const all: OwnerRegistration[] = raw ? JSON.parse(raw) : [];
+      const expLama = owner.expiryDate ? new Date(owner.expiryDate) : new Date();
+      const now = new Date();
+      const baseDate = expLama > now ? expLama : now;
+      const baruDate = new Date(baseDate.getTime() + hari * 86400000).toISOString();
+      const upd = all.map((o) => (o.id === owner.id ? { ...o, expiryDate: baruDate } : o));
+      await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(upd));
+      setDetailOwner((prev) => (prev ? { ...prev, expiryDate: baruDate } : null));
+      await loadAllData();
+      Alert.alert("Berhasil ✅", `Masa aktif toko ${owner.tokoName} diperpanjang +${hari} hari.`);
+    } catch {
+      Alert.alert("Error", "Gagal memperpanjang masa aktif.");
+    }
+  }
+
+  async function handleHapusOwner(owner: OwnerRegistration) {
+    Alert.alert(
+      "Hapus Toko / Owner?",
+      `Yakin ingin menghapus toko ${owner.tokoName}? Data tidak dapat dikembalikan.`,
+      [
+        { text: "Batal", style: "cancel" },
+        {
+          text: "Hapus",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const raw = await AsyncStorage.getItem("@twd_owner_registrations");
+              const all: OwnerRegistration[] = raw ? JSON.parse(raw) : [];
+              const upd = all.filter((o) => o.id !== owner.id);
+              await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(upd));
+              setShowOwnerMod(false);
+              await loadAllData();
+              Alert.alert("Toko Dihapus ✅", `Toko ${owner.tokoName} telah dihapus.`);
+            } catch {
+              Alert.alert("Error", "Gagal menghapus toko.");
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  async function handleToggleKasir(kasir: any) {
+    try {
+      const raw = await AsyncStorage.getItem("@twd_kasir_accounts");
+      const all: any[] = raw ? JSON.parse(raw) : [];
+      const upd = all.map((k) => (k.id === kasir.id ? { ...k, active: k.active === false ? true : false } : k));
+      await AsyncStorage.setItem("@twd_kasir_accounts", JSON.stringify(upd));
+      await loadAllData();
+    } catch {}
+  }
+
+  // ── Manajemen Mitra & User (Edit, Reset PIN, Hapus) ───────────────────
+  async function handleHapusUser(user: UserEntry) {
+    Alert.alert(
+      "Hapus Akun " + ROLE_LABEL[user.role] + "?",
+      `Yakin ingin menghapus akun '${user.name}'? Data tidak dapat dikembalikan.`,
+      [
+        { text: "Batal", style: "cancel" },
+        {
+          text: "Hapus",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              if (user.role === "marketing" || user.role === "sub_marketing") {
+                deleteMarketing(user.id);
+              } else if (user.role === "kurir") {
+                deleteKurir(user.id);
+              } else if (user.role === "owner") {
+                deleteOwnerRegistration(user.id);
+              }
+
+              const shouldKeep = (item: any) => {
+                const sameId    = Boolean(user.id)    && item.id === user.id;
+                const samePhone = Boolean(user.phone) && item.phone === user.phone;
+                const sameName  = Boolean(user.name)  && item.name === user.name;
+                return !(sameId || samePhone || sameName);
+              };
+
+              // ── 1. Alihkan hak milik Owner ke upline / super_admin saat Marketing/Sub-Marketing dihapus ──
+              if (user.role === "marketing" || user.role === "sub_marketing") {
+                const rawOwner = await AsyncStorage.getItem("@twd_owner_registrations");
+                const ownerList: any[] = rawOwner ? JSON.parse(rawOwner) : [];
+                let hasReassigned = false;
+
+                const rawMkt = await AsyncStorage.getItem("@twd_marketing_accounts");
+                const mktList: any[] = rawMkt ? JSON.parse(rawMkt) : [];
+                const targetMitra = mktList.find((m) => m.id === user.id || (m.phone && user.phone && m.phone === user.phone));
+                const uplineId = targetMitra?.uplineId || "super_admin";
+
+                const updOwners = ownerList.map((o) => {
+                  if (o.recruitedBy === user.id) {
+                    hasReassigned = true;
+                    if (user.role === "sub_marketing") {
+                      return { ...o, recruitedBy: uplineId, recruitedByRole: uplineId === "super_admin" ? "super_admin" : "marketing" };
+                    } else {
+                      return { ...o, recruitedBy: "super_admin", recruitedByRole: "marketing" };
+                    }
+                  }
+                  return o;
+                });
+
+                if (hasReassigned) {
+                  await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(updOwners));
+                }
+
+                if (user.role === "marketing") {
+                  const updSubMkt = mktList.map((m) => (m.uplineId === user.id ? { ...m, uplineId: "super_admin" } : m));
+                  await AsyncStorage.setItem("@twd_marketing_accounts", JSON.stringify(updSubMkt));
+                }
+              }
+
+              // ── 2. Hapus permanen akun pengguna dari semua memori penyimpanan ──
+              const rawMkt = await AsyncStorage.getItem("@twd_marketing_accounts");
+              const mktList: any[] = rawMkt ? JSON.parse(rawMkt) : [];
+              const updMkt = mktList.filter(shouldKeep);
+              await AsyncStorage.setItem("@twd_marketing_accounts", JSON.stringify(updMkt));
+
+              const rawV1 = await AsyncStorage.getItem("mkt_data_v1");
+              const v1: any = rawV1 ? JSON.parse(rawV1) : {};
+              if (v1.marketingAccounts) {
+                v1.marketingAccounts = v1.marketingAccounts.filter(shouldKeep);
+              }
+              if (v1.kurirAccounts) {
+                v1.kurirAccounts = v1.kurirAccounts.filter(shouldKeep);
+              }
+              await AsyncStorage.setItem("mkt_data_v1", JSON.stringify(v1));
+
+              const rawKurir = await AsyncStorage.getItem("@twd_kurir_accounts");
+              const kurirList: any[] = rawKurir ? JSON.parse(rawKurir) : [];
+              const updKurir = kurirList.filter(shouldKeep);
+              await AsyncStorage.setItem("@twd_kurir_accounts", JSON.stringify(updKurir));
+
+              if (user.role === "owner") {
+                const rawOwner = await AsyncStorage.getItem("@twd_owner_registrations");
+                const ownerList: any[] = rawOwner ? JSON.parse(rawOwner) : [];
+                const updOwner = ownerList.filter(shouldKeep);
+                await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(updOwner));
+              }
+
+              await deleteFromCloud(user.id);
+              setAllUsers((prev) => prev.filter(shouldKeep));
+              await loadAllData();
+              Alert.alert("Berhasil Dihapus ✅", `Akun '${user.name}' telah dihapus permanen dari sistem. Hak milik toko yang direkrut telah disesuaikan.`);
+            } catch {
+              Alert.alert("Error", "Gagal menghapus akun.");
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  async function handleResetPinUser(user: UserEntry) {
+    Alert.alert(
+      "Reset PIN ke 123456?",
+      `PIN untuk akun '${user.name}' akan diubah menjadi 123456.`,
+      [
+        { text: "Batal", style: "cancel" },
+        {
+          text: "Ya, Reset PIN",
+          onPress: async () => {
+            try {
+              if (user.role === "marketing" || user.role === "sub_marketing" || user.role === "kurir") {
+                const rawMkt = await AsyncStorage.getItem("@twd_marketing_accounts");
+                const mktList: any[] = rawMkt ? JSON.parse(rawMkt) : [];
+                const updMkt = mktList.map((m) => (m.id === user.id ? { ...m, pin: "123456" } : m));
+                await AsyncStorage.setItem("@twd_marketing_accounts", JSON.stringify(updMkt));
+
+                const rawV1 = await AsyncStorage.getItem("mkt_data_v1");
+                const v1: any = rawV1 ? JSON.parse(rawV1) : {};
+                if (user.role === "kurir") {
+                  v1.kurirAccounts = (v1.kurirAccounts ?? []).map((k: any) => (k.id === user.id ? { ...k, pin: "123456" } : k));
+                } else {
+                  v1.marketingAccounts = (v1.marketingAccounts ?? []).map((m: any) => (m.id === user.id ? { ...m, pin: "123456" } : m));
+                }
+                await AsyncStorage.setItem("mkt_data_v1", JSON.stringify(v1));
+              }
+              await loadAllData();
+              Alert.alert("PIN Direset ✅", `PIN akun '${user.name}' sekarang adalah 123456.`);
+            } catch {
+              Alert.alert("Error", "Gagal mereset PIN.");
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  function openEditModal(user: UserEntry) {
+    setSelectedUserEdit(user);
+    setEditName(user.name || "");
+    setEditPhone(user.phone || "");
+    setEditPin(user.pin || "123456");
+    setEditPaket((user.paket as any) || "basic");
+    setShowEditModal(true);
+  }
+
+  async function handleSaveEditUser() {
+    if (!selectedUserEdit) return;
+    if (!editName.trim() || !editPhone.trim()) {
+      Alert.alert("Error", "Nama dan No HP wajib diisi.");
+      return;
+    }
+    try {
+      if (selectedUserEdit.role === "marketing" || selectedUserEdit.role === "sub_marketing" || selectedUserEdit.role === "kurir") {
+        const rawMkt = await AsyncStorage.getItem("@twd_marketing_accounts");
+        const mktList: any[] = rawMkt ? JSON.parse(rawMkt) : [];
+        const updMkt = mktList.map((m) =>
+          m.id === selectedUserEdit.id
+            ? { ...m, name: editName.trim(), phone: editPhone.trim(), pin: editPin.trim() || "123456" }
+            : m,
+        );
+        await AsyncStorage.setItem("@twd_marketing_accounts", JSON.stringify(updMkt));
+
+        const rawV1 = await AsyncStorage.getItem("mkt_data_v1");
+        const v1: any = rawV1 ? JSON.parse(rawV1) : {};
+        if (selectedUserEdit.role === "kurir") {
+          v1.kurirAccounts = (v1.kurirAccounts ?? []).map((k: any) =>
+            k.id === selectedUserEdit.id
+              ? { ...k, name: editName.trim(), phone: editPhone.trim(), pin: editPin.trim() || "123456" }
+              : k,
+          );
+        } else {
+          v1.marketingAccounts = (v1.marketingAccounts ?? []).map((m: any) =>
+            m.id === selectedUserEdit.id
+              ? { ...m, name: editName.trim(), phone: editPhone.trim(), pin: editPin.trim() || "123456" }
+              : m,
+          );
+        }
+        await AsyncStorage.setItem("mkt_data_v1", JSON.stringify(v1));
+      }
+      if (selectedUserEdit.role === "owner") {
+        const rawOwner = await AsyncStorage.getItem("@twd_owner_registrations");
+        const ownerList: any[] = rawOwner ? JSON.parse(rawOwner) : [];
+        const updOwner = ownerList.map((o) =>
+          o.id === selectedUserEdit.id
+            ? { ...o, tokoName: editName.trim(), phone: editPhone.trim(), paket: editPaket }
+            : o,
+        );
+        await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(updOwner));
+      }
+      try {
+        await registerToCloud({
+          id: selectedUserEdit.id,
+          name: editName.trim(),
+          phone: editPhone.trim(),
+          pin: editPin.trim() || "123456",
+          role: selectedUserEdit.role,
+        });
+      } catch (err) {}
+      setShowEditModal(false);
+      await loadAllData();
+      Alert.alert("Tersimpan ✅", "Data akun berhasil diperbarui.");
+    } catch {
+      Alert.alert("Error", "Gagal menyimpan perubahan.");
+    }
+  }
 
   // ── Registrasi Mitra ──────────────────────────────────────────────────────
   async function handleRegister() {
@@ -328,6 +672,11 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
         v1.marketingAccounts = marketingAccounts;
       }
       await AsyncStorage.setItem("mkt_data_v1", JSON.stringify(v1));
+
+      // ✅ Daftarkan langsung ke Server Cloud VPS Biznet Gio agar HP lain bisa login
+      try {
+        await registerToCloud(newAccount);
+      } catch (err) {}
 
       const roleStr = regRole === "marketing" ? "Marketing" : regRole === "sub_marketing" ? "Sub Marketing" : "Kurir";
       Alert.alert(
@@ -446,7 +795,7 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
 
       {/* Tab Bar */}
       <View style={SA.tabBar}>
-        {(["dashboard", "pencairan", "users", "daftar"] as const).map((tab) => (
+        {(["dashboard", "owner", "kasir", "pencairan", "users", "daftar"] as const).map((tab) => (
           <TouchableOpacity
             key={tab}
             style={activeTab === tab ? SA.tabActive : SA.tabInactive}
@@ -454,6 +803,8 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
           >
             <Text style={activeTab === tab ? SA.tabLblActive : SA.tabLblInactive}>
               {tab === "dashboard" ? "📊" :
+               tab === "owner"     ? "🏪" :
+               tab === "kasir"     ? "💼" :
                tab === "pencairan" ? "💸" :
                tab === "users"     ? "👥" : "➕"}
             </Text>
@@ -472,6 +823,52 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
           contentContainerStyle={SA.scrollContent}
         >
+          {/* ── Ringkasan Ekosistem TWD ── */}
+          <Text style={SA.sectionTitlePlain}>{"📈 Performa & Ekosistem TWD Mobile"}</Text>
+          <View style={SA.statsGrid}>
+            <View style={[SA.statCard, { backgroundColor: "#EEF2FF", borderColor: "#C7D2FE" }]}>
+              <Text style={SA.statCardIcon}>{"💰"}</Text>
+              <Text style={[SA.statCardVal, { color: "#3730A3" }]}>{formatRpShort(totalOmzet)}</Text>
+              <Text style={SA.statCardLbl}>{"Total Omzet Ekosistem"}</Text>
+              <Text style={SA.statCardSub}>{String(totalOrders) + " transaksi pesanan"}</Text>
+            </View>
+            <View style={[SA.statCard, { backgroundColor: "#F0FDF4", borderColor: "#BBF7D0" }]}>
+              <Text style={SA.statCardIcon}>{"🏪"}</Text>
+              <Text style={[SA.statCardVal, { color: "#166534" }]}>{String(ownersList.length)}</Text>
+              <Text style={SA.statCardLbl}>{"Total Toko / Owner"}</Text>
+              <Text style={SA.statCardSub}>{String(ownersList.filter(o => o.paket === "pro" || o.paket === "enterprise").length) + " paket berbayar"}</Text>
+            </View>
+            <View style={[SA.statCard, { backgroundColor: "#FFFBEB", borderColor: "#FDE68A" }]}>
+              <Text style={SA.statCardIcon}>{"💼"}</Text>
+              <Text style={[SA.statCardVal, { color: "#92400E" }]}>{String(kasirList.length)}</Text>
+              <Text style={SA.statCardLbl}>{"Total Akun Kasir"}</Text>
+              <Text style={SA.statCardSub}>{"POS Warung aktif"}</Text>
+            </View>
+            <View style={[SA.statCard, { backgroundColor: "#FAF5FF", borderColor: "#E9D5FF" }]}>
+              <Text style={SA.statCardIcon}>{"👥"}</Text>
+              <Text style={[SA.statCardVal, { color: "#6B21A8" }]}>{String(allUsers.length)}</Text>
+              <Text style={SA.statCardLbl}>{"Mitra & Kurir"}</Text>
+              <Text style={SA.statCardSub}>{"Jaringan aktif"}</Text>
+            </View>
+          </View>
+
+          {/* ── Status Pembayaran Mayar.id ── */}
+          <View style={{ backgroundColor: "#EEF2FF", borderRadius: 16, padding: 14, marginBottom: 16, borderWidth: 1, borderColor: "#C7D2FE", flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <View style={{ backgroundColor: "#DBEAFE", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 }}>
+                <Text style={{ fontSize: 13, fontWeight: "900", color: "#1D4ED8" }}>{"mayar.id"}</Text>
+              </View>
+              <View>
+                <Text style={{ fontSize: 13, fontWeight: "800", color: "#1E3A8A" }}>{"Pembayaran Online Terintegrasi"}</Text>
+                <Text style={{ fontSize: 11, color: "#3B82F6" }}>{"QRIS, Virtual Account, & e-Wallet — Live Production"}</Text>
+              </View>
+            </View>
+            <View style={{ backgroundColor: "#DCFCE7", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12 }}>
+              <Text style={{ fontSize: 11, fontWeight: "800", color: "#15803D" }}>{"✅ CONNECTED"}</Text>
+            </View>
+          </View>
+
+          <Text style={SA.sectionTitlePlain}>{"💸 Statistik Pencairan Dana (WD)"}</Text>
           <View style={SA.statsGrid}>
             <View style={[SA.statCard, SA.statCardOrange]}>
               <Text style={SA.statCardIcon}>{"⏳"}</Text>
@@ -574,6 +971,91 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
             </View>
           )}
           <View style={SA.bottomSpacer} />
+        </ScrollView>
+      )}
+
+      {/* ════ TAB: PENCAIRAN ════ */}
+      {/* ════ TAB: OWNER (Manajemen Toko & Langganan) ════ */}
+      {activeTab === "owner" && (
+        <ScrollView
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          contentContainerStyle={SA.scrollContent}
+        >
+          <Text style={SA.sectionTitlePlain}>{"🏪 Manajemen Semua Toko & Owner (" + ownersList.length + ")"}</Text>
+          {ownersList.length === 0 ? (
+            <View style={SA.emptyCard}>
+              <Text style={SA.emptyTxt}>{"Belum ada toko terdaftar."}</Text>
+            </View>
+          ) : (
+            ownersList.map((owner) => (
+              <TouchableOpacity
+                key={owner.id}
+                style={[SA.card, { marginBottom: 12 }]}
+                onPress={() => { setDetailOwner(owner); setShowOwnerMod(true); }}
+              >
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <Text style={{ fontSize: 16, fontWeight: "800", color: "#1E293B" }}>
+                    {"🏪 " + (owner.tokoName || "Toko #" + owner.id.slice(-4))}
+                  </Text>
+                  <View style={{ backgroundColor: owner.paket === "enterprise" ? "#F3E8FF" : owner.paket === "pro" ? "#FEF3C7" : "#E2E8F0", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 }}>
+                    <Text style={{ fontSize: 11, fontWeight: "800", color: owner.paket === "enterprise" ? "#7E22CE" : owner.paket === "pro" ? "#D97706" : "#475569" }}>
+                      {(owner.paket || "basic").toUpperCase()}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>
+                  {"👤 " + owner.name + " · 📞 " + (owner.phone || "-")}
+                </Text>
+                <Text style={{ fontSize: 12, color: "#64748B", marginBottom: 8 }}>
+                  {"Kode Toko: "}
+                  <Text style={{ fontWeight: "800", color: "#2563EB" }}>{owner.kode || "TWD-" + owner.id.slice(-6).toUpperCase()}</Text>
+                  {" · Exp: " + (owner.expiryDate ? new Date(owner.expiryDate).toLocaleDateString("id-ID") : "Aktif")}
+                </Text>
+                <View style={{ flexDirection: "row", justifyContent: "flex-end", borderTopWidth: 1, borderTopColor: "#F1F5F9", paddingTop: 8 }}>
+                  <Text style={{ fontSize: 12, fontWeight: "700", color: "#7C3AED" }}>{"⚙️ Kelola Langganan →"}</Text>
+                </View>
+              </TouchableOpacity>
+            ))
+          )}
+        </ScrollView>
+      )}
+
+      {/* ════ TAB: KASIR (Manajemen Kasir Semua Toko) ════ */}
+      {activeTab === "kasir" && (
+        <ScrollView
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          contentContainerStyle={SA.scrollContent}
+        >
+          <Text style={SA.sectionTitlePlain}>{"💼 Semua Akun Kasir Toko (" + kasirList.length + ")"}</Text>
+          {kasirList.length === 0 ? (
+            <View style={SA.emptyCard}>
+              <Text style={SA.emptyTxt}>{"Belum ada akun kasir terdaftar."}</Text>
+            </View>
+          ) : (
+            kasirList.map((k) => (
+              <View key={k.id} style={[SA.card, { marginBottom: 10, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 15, fontWeight: "800", color: "#1E293B" }}>
+                    {"💼 " + (k.name || k.nama || "Kasir")}
+                  </Text>
+                  <Text style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>
+                    {"Toko Owner: #" + String(k.ownerId ?? "").slice(-4) + " · 📞 " + (k.phone || "-")}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>
+                    {"PIN: •••••• · Status: " + (k.active === false ? "NONAKTIF" : "AKTIF")}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={{ backgroundColor: k.active === false ? "#FEE2E2" : "#DCFCE7", paddingHorizontal: 14, paddingVertical: 8, borderRadius: 10 }}
+                  onPress={() => handleToggleKasir(k)}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: "800", color: k.active === false ? "#DC2626" : "#16A34A" }}>
+                    {k.active === false ? "▶️ Aktifkan" : "⏸️ Nonaktifkan"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            ))
+          )}
         </ScrollView>
       )}
 
@@ -715,22 +1197,61 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
                   </Text>
                 </View>
                 {users.map((u) => (
-                  <View key={u.id} style={SA.userCard}>
-                    <View style={[SA.userAvatar, { backgroundColor: ROLE_COLOR[role] + "20" }]}>
-                      <Text style={[SA.userAvatarTxt, { color: ROLE_COLOR[role] }]}>{safeInitial(u.name)}</Text>
-                    </View>
-                    <View style={SA.userInfo}>
-                      <Text style={SA.userName}>{u.name || "—"}</Text>
-                      {u.phone ? <Text style={SA.userPhone}>{"📞 " + u.phone}</Text> : null}
-                      {u.paket ? (
-                        <View style={SA.userPaketRow}>
-                          <View style={[SA.userPaketBadge, { backgroundColor: ROLE_COLOR[role] }]}>
-                            <Text style={SA.userPaketBadgeTxt}>{u.paket?.toUpperCase() ?? ""}</Text>
-                          </View>
+                  <View key={u.id} style={[SA.userCard, { flexDirection: "column", alignItems: "stretch" }]}>
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", flex: 1, gap: 10 }}>
+                        <View style={[SA.userAvatar, { backgroundColor: ROLE_COLOR[role] + "20" }]}>
+                          <Text style={[SA.userAvatarTxt, { color: ROLE_COLOR[role] }]}>{safeInitial(u.name)}</Text>
                         </View>
-                      ) : null}
+                        <View style={SA.userInfo}>
+                          <Text style={SA.userName}>{u.name || "—"}</Text>
+                          {u.phone ? (
+                            <Text style={SA.userPhone}>
+                              {"📞 " + u.phone + (u.pin ? "  |  🔑 PIN: " + u.pin : "")}
+                            </Text>
+                          ) : null}
+                          {u.paket ? (
+                            <View style={SA.userPaketRow}>
+                              <View style={[SA.userPaketBadge, { backgroundColor: ROLE_COLOR[role] }]}>
+                                <Text style={SA.userPaketBadgeTxt}>{u.paket?.toUpperCase() ?? ""}</Text>
+                              </View>
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
+                      <View style={{ alignItems: "flex-end" }}>
+                        <Text style={SA.userId}>{"#" + safeSlice(u.id, -6, "USER")}</Text>
+                        {u.pin ? (
+                          <View style={{ backgroundColor: "#EEF2FF", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, marginTop: 6, borderWidth: 1, borderColor: "#C7D2FE" }}>
+                            <Text style={{ fontSize: 11, fontWeight: "900", color: "#4338CA" }}>
+                              {"🔑 PIN: " + u.pin}
+                            </Text>
+                          </View>
+                        ) : null}
+                      </View>
                     </View>
-                    <Text style={SA.userId}>{"#" + String(u.id).slice(-6)}</Text>
+
+                    {/* Tombol Aksi Super Admin (Edit, Reset PIN, Hapus) */}
+                    <View style={{ flexDirection: "row", gap: 8, marginTop: 12, borderTopWidth: 1, borderTopColor: "#F1F5F9", paddingTop: 10 }}>
+                      <TouchableOpacity
+                        style={{ flex: 1, backgroundColor: "#EFF6FF", paddingVertical: 8, borderRadius: 10, alignItems: "center", borderWidth: 1, borderColor: "#BFDBFE" }}
+                        onPress={() => openEditModal(u)}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: "800", color: "#1D4ED8" }}>{"✏️ Edit"}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={{ flex: 1, backgroundColor: "#F5F3FF", paddingVertical: 8, borderRadius: 10, alignItems: "center", borderWidth: 1, borderColor: "#DDD6FE" }}
+                        onPress={() => handleResetPinUser(u)}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: "800", color: "#6D28D9" }}>{"🔑 Reset PIN"}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={{ flex: 1, backgroundColor: "#FEF2F2", paddingVertical: 8, borderRadius: 10, alignItems: "center", borderWidth: 1, borderColor: "#FECACA" }}
+                        onPress={() => handleHapusUser(u)}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: "800", color: "#DC2626" }}>{"🗑️ Hapus"}</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
                 ))}
               </View>
@@ -919,6 +1440,191 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
           </View>
         </View>
       </Modal>
+
+      {/* ── Modal Kelola Langganan Toko (Owner) ── */}
+      <Modal visible={showOwnerMod} transparent animationType="slide" onRequestClose={() => setShowOwnerMod(false)}>
+        <View style={SA.overlay}>
+          <View style={SA.detailSheet}>
+            {detailOwner && (
+              <>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <Text style={{ fontSize: 18, fontWeight: "800", color: "#1E293B" }}>
+                    {"🏪 " + detailOwner.tokoName}
+                  </Text>
+                  <TouchableOpacity onPress={() => setShowOwnerMod(false)}>
+                    <Text style={{ fontSize: 20, color: "#64748B", fontWeight: "700" }}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={{ backgroundColor: "#F8FAFC", borderRadius: 12, padding: 12, marginBottom: 14, borderWidth: 1, borderColor: "#E2E8F0" }}>
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: "#1E293B" }}>{"👤 Owner: " + detailOwner.name}</Text>
+                  <Text style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{"📞 WhatsApp: " + (detailOwner.phone || "-")}</Text>
+                  <Text style={{ fontSize: 12, color: "#2563EB", fontWeight: "700", marginTop: 4 }}>
+                    {"Kode Toko: " + (detailOwner.kode || "TWD-" + detailOwner.id.slice(-6).toUpperCase())}
+                  </Text>
+                </View>
+
+                <Text style={{ fontSize: 13, fontWeight: "800", color: "#334155", marginBottom: 8 }}>
+                  {"⚡ Ganti Paket Langganan Toko:"}
+                </Text>
+                <View style={{ flexDirection: "row", gap: 8, marginBottom: 16 }}>
+                  {(["basic", "pro", "enterprise"] as const).map((pkg) => (
+                    <TouchableOpacity
+                      key={pkg}
+                      style={{
+                        flex: 1,
+                        backgroundColor: detailOwner.paket === pkg ? "#EEF2FF" : "#F1F5F9",
+                        paddingVertical: 10,
+                        borderRadius: 10,
+                        alignItems: "center",
+                        borderWidth: 1,
+                        borderColor: detailOwner.paket === pkg ? "#6366F1" : "#E2E8F0",
+                      }}
+                      onPress={() => handleUpdatePaketOwner(detailOwner, pkg)}
+                    >
+                      <Text style={{ fontSize: 12, fontWeight: detailOwner.paket === pkg ? "800" : "600", color: detailOwner.paket === pkg ? "#4338CA" : "#64748B" }}>
+                        {pkg.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <Text style={{ fontSize: 13, fontWeight: "800", color: "#334155", marginBottom: 8 }}>
+                  {"📅 Perpanjang Masa Aktif:"}
+                </Text>
+                <View style={{ flexDirection: "row", gap: 8, marginBottom: 18 }}>
+                  <TouchableOpacity
+                    style={{ flex: 1, backgroundColor: "#EEF2FF", borderRadius: 10, paddingVertical: 12, alignItems: "center", borderWidth: 1, borderColor: "#C7D2FE" }}
+                    onPress={() => handlePerpanjangOwner(detailOwner, 30)}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: "800", color: "#4338CA" }}>{"+ 30 Hari (1 Bulan)"}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={{ flex: 1, backgroundColor: "#EEF2FF", borderRadius: 10, paddingVertical: 12, alignItems: "center", borderWidth: 1, borderColor: "#C7D2FE" }}
+                    onPress={() => handlePerpanjangOwner(detailOwner, 365)}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: "800", color: "#4338CA" }}>{"+ 365 Hari (1 Tahun)"}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TouchableOpacity
+                  style={{ backgroundColor: "#FEE2E2", borderRadius: 12, paddingVertical: 14, alignItems: "center" }}
+                  onPress={() => handleHapusOwner(detailOwner)}
+                >
+                  <Text style={{ color: "#DC2626", fontWeight: "800", fontSize: 13 }}>{"❌ Hapus / Nonaktifkan Toko Ini"}</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Modal Edit Akun Mitra / User (Super Admin) ── */}
+      <Modal visible={showEditModal} transparent animationType="slide" onRequestClose={() => setShowEditModal(false)}>
+        <View style={SA.overlay}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setShowEditModal(false)} />
+          <View style={SA.detailSheet}>
+            {selectedUserEdit && (
+              <>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                  <Text style={{ fontSize: 18, fontWeight: "800", color: "#1E293B" }}>
+                    {"✏️ Edit " + ROLE_LABEL[selectedUserEdit.role]}
+                  </Text>
+                  <TouchableOpacity onPress={() => setShowEditModal(false)}>
+                    <Text style={{ fontSize: 20, color: "#64748B", fontWeight: "700" }}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155", marginBottom: 6 }}>
+                    {"👤 Nama Lengkap *"}
+                  </Text>
+                  <TextInput
+                    style={{ backgroundColor: "#F8FAFC", borderRadius: 10, borderWidth: 1, borderColor: "#E2E8F0", paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: "#1E293B", marginBottom: 14 }}
+                    value={editName}
+                    onChangeText={setEditName}
+                    placeholder="Nama lengkap pengguna"
+                    placeholderTextColor="#94A3B8"
+                  />
+
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155", marginBottom: 6 }}>
+                    {"📞 Nomor HP (WhatsApp) *"}
+                  </Text>
+                  <TextInput
+                    style={{ backgroundColor: "#F8FAFC", borderRadius: 10, borderWidth: 1, borderColor: "#E2E8F0", paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: "#1E293B", marginBottom: 14 }}
+                    value={editPhone}
+                    onChangeText={setEditPhone}
+                    placeholder="Contoh: 081234567890"
+                    placeholderTextColor="#94A3B8"
+                    keyboardType="phone-pad"
+                  />
+
+                  {selectedUserEdit.role !== "owner" && (
+                    <>
+                      <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155", marginBottom: 6 }}>
+                        {"🔑 PIN Login (6 Angka)"}
+                      </Text>
+                      <TextInput
+                        style={{ backgroundColor: "#F8FAFC", borderRadius: 10, borderWidth: 1, borderColor: "#E2E8F0", paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: "#1E293B", marginBottom: 14 }}
+                        value={editPin}
+                        onChangeText={setEditPin}
+                        placeholder="Contoh: 123456"
+                        placeholderTextColor="#94A3B8"
+                        keyboardType="number-pad"
+                        secureTextEntry={false}
+                      />
+                    </>
+                  )}
+
+                  {selectedUserEdit.role === "owner" && (
+                    <>
+                      <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155", marginBottom: 6 }}>
+                        {"⚡ Paket Langganan Toko"}
+                      </Text>
+                      <View style={{ flexDirection: "row", gap: 8, marginBottom: 16 }}>
+                        {(["basic", "pro", "enterprise"] as const).map((pkg) => (
+                          <TouchableOpacity
+                            key={pkg}
+                            style={{
+                              flex: 1,
+                              backgroundColor: editPaket === pkg ? "#EEF2FF" : "#F1F5F9",
+                              paddingVertical: 10,
+                              borderRadius: 10,
+                              alignItems: "center",
+                              borderWidth: 1,
+                              borderColor: editPaket === pkg ? "#6366F1" : "#E2E8F0",
+                            }}
+                            onPress={() => setEditPaket(pkg)}
+                          >
+                            <Text style={{ fontSize: 12, fontWeight: editPaket === pkg ? "800" : "600", color: editPaket === pkg ? "#4338CA" : "#64748B" }}>
+                              {pkg.toUpperCase()}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </>
+                  )}
+
+                  <View style={{ flexDirection: "row", gap: 10, marginTop: 10, marginBottom: 10 }}>
+                    <TouchableOpacity
+                      style={{ flex: 1, backgroundColor: "#F1F5F9", borderRadius: 12, paddingVertical: 14, alignItems: "center" }}
+                      onPress={() => setShowEditModal(false)}
+                    >
+                      <Text style={{ fontSize: 14, fontWeight: "700", color: "#64748B" }}>{"Batal"}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{ flex: 2, backgroundColor: "#10B981", borderRadius: 12, paddingVertical: 14, alignItems: "center", elevation: 2 }}
+                      onPress={handleSaveEditUser}
+                    >
+                      <Text style={{ color: "#fff", fontWeight: "800", fontSize: 15 }}>{"💾 Simpan Perubahan"}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </ScrollView>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1088,4 +1794,6 @@ const SA = StyleSheet.create({
   detailFinalBadge:   { borderRadius: 12, padding: 14, alignItems: "center", marginBottom: 10 },
   detailFinalTxt:     { fontSize: 14, fontWeight: "700" },
   sheetBottomSafe:    { height: BOTTOM_SAFE },
+  card:               { backgroundColor: "#fff", borderRadius: 16, padding: 16, borderWidth: 1, borderColor: "#E2E8F0", elevation: 2 },
+  emptyCard:          { backgroundColor: "#fff", borderRadius: 16, padding: 24, alignItems: "center", borderWidth: 1, borderColor: "#E2E8F0", marginBottom: 16 },
 });

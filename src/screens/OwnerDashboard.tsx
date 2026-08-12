@@ -7,6 +7,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Modal,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,6 +17,7 @@ import {
   View,
 } from "react-native";
 import { useAuth } from "../context/AuthContext";
+import { createMayarPayment } from "../utils/MayarService";
 import { GlobalProduct } from "../context/GlobalProductContext";
 import {
   PAKET_FEATURES,
@@ -653,6 +655,28 @@ export default function OwnerDashboard() {
   const [bankInput,     setBankInput]     = useState<BankAccount>({ namaBank: "", nomorRekening: "", namaPemilik: "" });
   const [wdJumlah,      setWdJumlah]     = useState("");
   const [showWdForm,    setShowWdForm]   = useState(false);
+  const [showMayarSubModal, setShowMayarSubModal] = useState(false);
+
+  const handleBayarLanggananMayar = async () => {
+    const harga = PAKET_HARGA[paket] || 50000;
+    const tokoName = myRegistration?.tokoName || "Toko Owner";
+    try {
+      const mayarResp = await createMayarPayment({
+        orderId:       `SUB-${Date.now()}`,
+        amount:        harga,
+        customerName:  tokoName,
+        customerEmail: "owner@twdmobile.com",
+        customerPhone: "081200000000",
+        description:   `Langganan TWD ${PAKET_LABEL[paket]} - ${tokoName}`,
+      });
+      if (mayarResp && mayarResp.linkUrl && !mayarResp.linkUrl.includes("mayar.id/pay/twdmobile")) {
+        return Linking.openURL(mayarResp.linkUrl);
+      }
+      setShowMayarSubModal(true);
+    } catch {
+      setShowMayarSubModal(true);
+    }
+  };
 
   const myId = user?.id ?? "";
 
@@ -1682,13 +1706,90 @@ export default function OwnerDashboard() {
               <Text style={S.perpanjangTxt}>{"Hubungi marketing kamu untuk melakukan pembayaran dan perpanjangan langganan."}</Text>
             </View>
             <TouchableOpacity
-              style={[S.sheetBtn, { backgroundColor: PAKET_COLOR[paket], marginTop: 16 }]}
+              style={{ backgroundColor: "#2563EB", borderRadius: 12, paddingVertical: 14, alignItems: "center", marginTop: 12, elevation: 2 }}
+              onPress={handleBayarLanggananMayar}
+            >
+              <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>
+                {"⚡ Bayar Online via mayar.id (QRIS/VA/e-Wallet) →"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[S.sheetBtn, { backgroundColor: "#64748B", marginTop: 10 }]}
               onPress={() => setShowPerpanjang(false)}
             >
-              <Text style={S.sheetBtnTxt}>{"OK, Mengerti"}</Text>
+              <Text style={S.sheetBtnTxt}>{"Tutup"}</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
+      </Modal>
+
+      {/* ── Modal Simulasi Pembayaran Langganan Owner (mayar.id) ── */}
+      <Modal visible={showMayarSubModal} transparent animationType="slide" onRequestClose={() => setShowMayarSubModal(false)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", padding: 20 }}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setShowMayarSubModal(false)} />
+          <View style={{ backgroundColor: "#fff", borderRadius: 24, padding: 20, elevation: 10 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <View style={{ backgroundColor: "#EEF2FF", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}>
+                  <Text style={{ fontSize: 13, fontWeight: "900", color: "#4338CA" }}>{"mayar.id"}</Text>
+                </View>
+                <Text style={{ fontSize: 16, fontWeight: "800", color: "#1E293B" }}>{"Pembayaran Langganan"}</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowMayarSubModal(false)}>
+                <Text style={{ fontSize: 20, color: "#64748B", fontWeight: "700" }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ backgroundColor: "#F8FAFC", borderRadius: 14, padding: 14, alignItems: "center", marginBottom: 14, borderWidth: 1, borderColor: "#E2E8F0" }}>
+              <Text style={{ fontSize: 12, color: "#64748B" }}>{"Paket " + PAKET_LABEL[paket] + " (1 Bulan):"}</Text>
+              <Text style={{ fontSize: 26, fontWeight: "900", color: "#2563EB", marginVertical: 2 }}>
+                {"Rp " + ((PAKET_HARGA[paket] || 50000) / 1000).toFixed(0) + ".000"}
+              </Text>
+              <Text style={{ fontSize: 11, color: "#16A34A", fontWeight: "700" }}>
+                {"✅ TWD POS — " + (myRegistration?.tokoName || "Toko Anda")}
+              </Text>
+            </View>
+
+            <View style={{ backgroundColor: "#fff", borderRadius: 16, padding: 16, alignItems: "center", marginBottom: 16, borderWidth: 1.5, borderColor: "#E2E8F0" }}>
+              <Text style={{ fontSize: 13, fontWeight: "800", color: "#1E293B", marginBottom: 4 }}>
+                {"📱 SCAN QRIS PEMBAYARAN"}
+              </Text>
+              <Text style={{ fontSize: 11, color: "#64748B", marginBottom: 12 }}>
+                {"Bisa di-scan menggunakan DANA, GoPay, OVO, ShopeePay, BCA, dll."}
+              </Text>
+              <View style={{ width: 150, height: 150, backgroundColor: "#F1F5F9", borderRadius: 12, justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#CBD5E1", marginBottom: 10 }}>
+                <Text style={{ fontSize: 52 }}>{"📱"}</Text>
+                <Text style={{ fontSize: 11, fontWeight: "800", color: "#475569", marginTop: 4 }}>
+                  {"[QRIS MAYAR.ID]"}
+                </Text>
+              </View>
+              <Text style={{ fontSize: 11, color: "#2563EB", fontWeight: "700" }}>
+                {"Nomor VA Bank: 88910" + Math.floor(10000000 + Math.random() * 90000000)}
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={{ backgroundColor: "#10B981", borderRadius: 14, paddingVertical: 14, alignItems: "center", elevation: 2 }}
+              onPress={async () => {
+                try {
+                  const currentExp = await AsyncStorage.getItem("twd_expiry_date");
+                  const baseDate = currentExp && new Date(currentExp) > new Date() ? new Date(currentExp) : new Date();
+                  const newExp = new Date(baseDate.getTime() + 30 * 86400000).toISOString();
+                  await AsyncStorage.setItem("twd_expiry_date", newExp);
+                  setShowMayarSubModal(false);
+                  setShowPerpanjang(false);
+                  Alert.alert("Langganan Aktif! 🎉", `Pembayaran via Mayar.id sukses! Masa aktif paket ${PAKET_LABEL[paket]} toko Anda diperpanjang +30 Hari.`);
+                } catch {
+                  Alert.alert("Error", "Gagal mengaktifkan langganan.");
+                }
+              }}
+            >
+              <Text style={{ color: "#fff", fontWeight: "800", fontSize: 15 }}>
+                {"✅ Bayar Sekarang (Simulasi Sukses)"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </Modal>
     </View>
   );

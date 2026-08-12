@@ -569,4 +569,33 @@ export async function checkAndNotifyLanggananFull(
   await checkAndNotifyLangganan(tokoName, expiry);
 }
 
-// ─── Jadwal Pengecekan Langganan Harian ─────────────────────────────────────\r\n\r\nexport async function scheduleLanggananCheck(hourOfDay = 9): Promise<string> {\r\n  // Batalkan jadwal lama jika ada\r\n  await Notifications.cancelAllScheduledNotificationsAsync();\r\n  // Catatan: Ini akan membatalkan SEMUA jadwal notifikasi lain (stok, reminder, dll).\r\n  // Untuk produksi sebenarnya, kita harus menyimpan ID jadwal masing-masing dan membatalkan secara selektif.\r\n  // Namun, untuk kesederhanaan dan karena jumlah jadwal kecil, kita asumsikan ini cukup.\r\n  // Jika diperlukan di masa depan, bisa disimpan masing-masing ID ke AsyncStorage.\r\n\r\n  const id = await Notifications.scheduleNotificationAsync({\r\n    content: {\r\n      title: \"📅 Cek Langganan Harian\",\r\n      body:  \"Sistem sedang memeriksa status langganan toko Anda.\",\r\n      data:  { type: \"daily_langganan_check\" },\r\n      sound: \"default\",\r\n      ...(Platform.OS === \"android\" ? { channelId: \"general\" } : {}),\r\n    },\r\n    trigger: {\r\n      type:   Notifications.SchedulableTriggerInputTypes.DAILY,\r\n      hour:   hourOfDay,\r\n      minute: 0,\r\n    },\r\n  });\r\n  return id;\r\n}\r\n\r\nexport async function cancelScheduledLanggananCheck(): Promise<void> {\r\n  await Notifications.cancelAllScheduledNotificationsAsync();\r\n}
+// ─── Jadwal Pengecekan Langganan Harian ─────────────────────────────────────
+
+export async function scheduleLanggananCheck(hourOfDay = 9): Promise<string> {
+  // Batalkan jadwal lama jika ada
+  await Notifications.cancelAllScheduledNotificationsAsync();
+  // Catatan: Ini akan membatalkan SEMUA jadwal notifikasi lain (stok, reminder, dll).
+  // Untuk produksi sebenarnya, kita harus menyimpan ID jadwal masing-masing dan membatalkan secara selektif.
+  // Namun, untuk kesederhanaan dan karena jumlah jadwal kecil, kita asumsikan ini cukup.
+  // Jika diperlukan di masa depan, bisa disimpan masing-masing ID ke AsyncStorage.
+
+  const id = await Notifications.scheduleNotificationAsync({
+    content: {
+      title: "📅 Cek Langganan Harian",
+      body:  "Sistem sedang memeriksa status langganan toko Anda.",
+      data:  { type: "daily_langganan_check" },
+      sound: "default",
+      ...(Platform.OS === "android" ? { channelId: "general" } : {}),
+    },
+    trigger: {
+      type:   Notifications.SchedulableTriggerInputTypes.DAILY,
+      hour:   hourOfDay,
+      minute: 0,
+    },
+  });
+  return id;
+}
+
+export async function cancelScheduledLanggananCheck(): Promise<void> {
+  await Notifications.cancelAllScheduledNotificationsAsync();
+}

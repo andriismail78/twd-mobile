@@ -1,15 +1,18 @@
 // app/_layout.tsx
 
 // ✅ WAJIB: Polyfill crypto untuk React Native — harus di baris PALING ATAS
-if (typeof global !== "undefined" && !(global as any).crypto) {
-  (global as any).crypto = {
-    getRandomValues: function (array: Uint8Array) {
+if (typeof global !== "undefined") {
+  if (!(global as any).crypto) {
+    (global as any).crypto = {};
+  }
+  if (!(global as any).crypto.getRandomValues) {
+    (global as any).crypto.getRandomValues = function (array: Uint8Array) {
       for (let i = 0; i < array.length; i++) {
         array[i] = Math.floor(Math.random() * 256);
       }
       return array;
-    },
-  };
+    };
+  }
 }
 
 import { Slot } from "expo-router";

@@ -87,6 +87,18 @@ export default function PaymentSettingScreen({ onBack }: Props) {
     setEditLon(storeLongitude ? storeLongitude.toString() : "");
   }, [storeName, ownerName, storeAddress, storePhone, storeLatitude, storeLongitude]);
 
+  // ── State Mayar.id Link ────────────────────────────────────────────────────
+  const [mayarLink, setMayarLink] = useState("");
+  useEffect(() => {
+    AsyncStorage.getItem("@twd_mayar_link").then(val => {
+      if (val) setMayarLink(val);
+    });
+  }, []);
+  const handleSaveMayarLink = async () => {
+    await AsyncStorage.setItem("@twd_mayar_link", mayarLink.trim());
+    Alert.alert("Tersimpan ✅", "Link pembayaran Mayar.id berhasil disimpan.");
+  };
+
   // ── State per metode ───────────────────────────────────────────────────────
   const [fieldValues, setFieldValues] = useState<Record<string, Record<string, string>>>(() => {
     const init: Record<string, Record<string, string>> = {};
@@ -326,6 +338,50 @@ export default function PaymentSettingScreen({ onBack }: Props) {
         <Text style={S.sectionDesc}>
           Aktifkan metode yang tersedia di toko Anda. Customer dapat memilih metode yang aktif saat checkout.
         </Text>
+
+        {/* ── Integrasi Pembayaran Otomatis (mayar.id) ── */}
+        <Card style={[S.card, { borderColor: "#6366F1", borderWidth: 1.5, backgroundColor: "#F8FAFC" }]}>
+          <Card.Content>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <View style={{ backgroundColor: "#EEF2FF", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}>
+                  <Text style={{ fontSize: 13, fontWeight: "900", color: "#4338CA" }}>{"mayar.id"}</Text>
+                </View>
+                <Text style={{ fontSize: 15, fontWeight: "800", color: "#1E293B" }}>
+                  {"Pembayaran Otomatis"}
+                </Text>
+              </View>
+              <View style={{ backgroundColor: "#DCFCE7", paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12 }}>
+                <Text style={{ fontSize: 11, fontWeight: "800", color: "#15803D" }}>{"✅ TERINTEGRASI"}</Text>
+              </View>
+            </View>
+            <Text style={{ fontSize: 12, color: "#64748B", lineHeight: 18, marginBottom: 12 }}>
+              {"Menggantikan DOKU. Customer sekarang dapat checkout otomatis via QRIS, Virtual Account Bank, dan e-Wallet di halaman pembayaran Mayar.id toko Anda."}
+            </Text>
+            <View style={{ backgroundColor: "#fff", borderRadius: 10, padding: 12, borderWidth: 1, borderColor: "#E2E8F0", marginTop: 4 }}>
+              <Text style={{ fontSize: 12, fontWeight: "800", color: "#1E293B", marginBottom: 4 }}>
+                {"🔗 Link Pembayaran mayar.id Toko Anda:"}
+              </Text>
+              <Text style={{ fontSize: 11, color: "#64748B", marginBottom: 8 }}>
+                {"Buat 'Single Payment / Link Pembayaran' di dasbor Mayar.id, lalu paste link-nya ke bawah ini agar customer langsung diarahkan ke pembayaran Anda:"}
+              </Text>
+              <TextInput
+                mode="outlined"
+                placeholder="https://mayar.id/pay/nama-toko-anda"
+                value={mayarLink}
+                onChangeText={setMayarLink}
+                style={{ backgroundColor: "#F8FAFC", marginBottom: 8, height: 42 }}
+                autoCapitalize="none"
+              />
+              <TouchableOpacity
+                style={{ backgroundColor: "#6366F1", paddingVertical: 10, borderRadius: 10, alignItems: "center" }}
+                onPress={handleSaveMayarLink}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>{"💾 Simpan Link Mayar.id"}</Text>
+              </TouchableOpacity>
+            </View>
+          </Card.Content>
+        </Card>
 
         {ALL_METHODS.map(method => {
           const enabled    = isEnabled(method.id);

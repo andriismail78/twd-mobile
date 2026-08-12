@@ -6,6 +6,7 @@ import React, {
   useEffect,
   useState,
 } from "react";
+import { MASTER_GLOBAL_PRODUCTS } from "../config/masterGlobalProducts";
 
 const STORAGE_KEY_STORE_PRODUCTS  = "@twd_products";
 const STORAGE_KEY_GLOBAL_PRODUCTS = "@twd_global_products";
@@ -85,8 +86,14 @@ export function GlobalProductProvider({ children }: { children: React.ReactNode 
       const raw = await AsyncStorage.getItem(STORAGE_KEY_GLOBAL_PRODUCTS);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) setGlobalProducts(parsed);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setGlobalProducts(parsed);
+          return;
+        }
       }
+      // ✅ Jika belum ada atau kosong, otomatis pasang master seeder 35+ produk ritel UKM!
+      await AsyncStorage.setItem(STORAGE_KEY_GLOBAL_PRODUCTS, JSON.stringify(MASTER_GLOBAL_PRODUCTS));
+      setGlobalProducts(MASTER_GLOBAL_PRODUCTS);
     } catch { /* ignore */ }
   }, []);
 

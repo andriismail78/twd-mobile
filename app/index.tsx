@@ -6,8 +6,10 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
+import Constants from "expo-constants";
 
 import { useAuth } from "../src/context/AuthContext";
+import TwdLogoBadge from "../src/components/TwdLogoBadge";
 
 import CustomerApp from "../src/screens/customer/CustomerApp";
 import KasirScreen from "../src/screens/KasirScreen";
@@ -58,31 +60,38 @@ function AppRouter() {
 
 function RoleSelector() {
   const [pilihan, setPilihan] = useState<PilihanRole>(null);
+  const appTarget = (Constants.expoConfig?.extra?.appTarget || "super").toLowerCase();
 
-  if (pilihan === "customer") {
+  // Jika di-build khusus untuk Customer APK, langsung tampilkan toko online customer
+  if (appTarget === "customer" || pilihan === "customer") {
     return (
       <View style={S.flex}>
         <CustomerApp />
-        <TouchableOpacity
-          style={S.backFloating}
-          onPress={() => setPilihan(null)}
-        >
-          <Text style={S.backFloatingText}>← Kembali</Text>
-        </TouchableOpacity>
+        {appTarget === "super" && (
+          <TouchableOpacity
+            style={S.backFloating}
+            onPress={() => setPilihan(null)}
+          >
+            <Text style={S.backFloatingText}>← Kembali</Text>
+          </TouchableOpacity>
+        )}
       </View>
     );
   }
 
-  if (pilihan === "owner_kasir") {
+  // Jika di-build untuk Marketing, Kurir, WarungPOS, atau jika pengguna memilih Owner/Kasir
+  if (appTarget !== "super" || pilihan === "owner_kasir") {
     return (
       <View style={S.flex}>
         <LoginScreen />
-        <TouchableOpacity
-          style={S.backFloating}
-          onPress={() => setPilihan(null)}
-        >
-          <Text style={S.backFloatingText}>← Kembali</Text>
-        </TouchableOpacity>
+        {appTarget === "super" && (
+          <TouchableOpacity
+            style={S.backFloating}
+            onPress={() => setPilihan(null)}
+          >
+            <Text style={S.backFloatingText}>← Kembali</Text>
+          </TouchableOpacity>
+        )}
       </View>
     );
   }
@@ -90,9 +99,8 @@ function RoleSelector() {
   return (
     <View style={S.selectorRoot}>
       <View style={S.selectorHero}>
-        <Text style={S.selectorEmoji}>🏪</Text>
-        <Text style={S.selectorTitle}>TWD Mobile</Text>
-        <Text style={S.selectorSubtitle}>Pilih cara masuk</Text>
+        <TwdLogoBadge size="large" showSubtitle={true} />
+        <Text style={[S.selectorSubtitle, { marginTop: 12 }]}>Pilih cara masuk ke aplikasi</Text>
       </View>
 
       <View style={S.roleCards}>

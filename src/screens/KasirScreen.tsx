@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Alert,
   FlatList,
+  Image,
   Keyboard,
   Modal,
   Pressable,
@@ -21,6 +22,7 @@ import {
 } from "react-native";
 import { useAuth } from "../context/AuthContext";
 import { useProducts } from "../context/ProductsContext";
+import TwdLogoBadge from "../components/TwdLogoBadge";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -88,13 +90,16 @@ interface OnlineOrder {
   items: Array<{ productId: string; name: string; price: number; qty: number }>;
   subtotal: number;
   total: number;
-  status: "menunggu" | "diproses" | "dikirim" | "selesai" | "dibatalkan";
+  status: "menunggu" | "diproses" | "dikirim" | "selesai" | "dibatalkan" | "tertunda";
   kurirId?: string;
   kurirName?: string;
   metodeBayar?: string;
   createdAt: string;
   note?: string;
   catatanKasir?: string;
+  fotoBuktiKirim?: string;
+  kendalaKirim?: string;
+  namaPenerima?: string;
 }
 
 interface KurirAccount {
@@ -403,8 +408,28 @@ export default function KasirScreen({
     if (!ownerIdValid) return;
     try {
       const raw = await AsyncStorage.getItem(KURIR_KEY);
-      const all: KurirAccount[] = raw ? JSON.parse(raw) : [];
-      setKurirList(all.filter((k) => String(k.ownerId ?? "").trim() === resolvedOwnerId && k.verified));
+      const all: any[] = raw ? JSON.parse(raw) : [];
+      const validKurir: KurirAccount[] = all
+        .filter((k) => {
+          const isVerified =
+            k.verified === true ||
+            k.status === "terverifikasi" ||
+            k.aktif === true ||
+            k.status === "menunggu_verifikasi";
+          const matchOwner =
+            !k.ownerId ||
+            String(k.ownerId).trim() === "" ||
+            String(k.ownerId).trim() === resolvedOwnerId;
+          return isVerified && matchOwner && k.status !== "ditolak";
+        })
+        .map((k) => ({
+          id: k.id,
+          ownerId: k.ownerId ?? resolvedOwnerId,
+          name: k.name || k.nama || "Kurir",
+          phone: k.phone || k.noHp || "",
+          verified: true,
+        }));
+      setKurirList(validKurir);
     } catch (e) { console.error("loadKurir:", e); }
   }, [resolvedOwnerId, ownerIdValid]);
 
@@ -665,10 +690,9 @@ export default function KasirScreen({
     } catch {}
   };
 
-  // ── Online: Konfirmasi dengan kurir (menunggu → diproses) ─────────────
+  // ── Online: Konfirmasi pesanan siap (menunggu → diproses) ─────────────
   const handleKonfirmasiOrder = async () => {
     if (!selectedOrder) return;
-    if (!selectedKurirId) { Alert.alert("Pilih Kurir", "Silakan pilih kurir terlebih dahulu."); return; }
 
     // Validasi stok sebelum konfirmasi
     const stokCheck = await validateStokOrder(selectedOrder);
@@ -677,7 +701,7 @@ export default function KasirScreen({
       return;
     }
 
-    const kurir = kurirList.find((k) => k.id === selectedKurirId);
+    const kurir = selectedKurirId ? kurirList.find((k) => k.id === selectedKurirId) : null;
     setProcessingOrder(true);
     try {
       // Simpan catatan kasir jika ada
@@ -690,8 +714,8 @@ export default function KasirScreen({
           ? {
               ...o,
               status: "diproses" as const,
-              kurirId: selectedKurirId,
-              kurirName: kurir?.name ?? "-",
+              kurirId: selectedKurirId || "",
+              kurirName: kurir?.name || "",
               catatanKasir: catatanKasirInput.trim() || o.catatanKasir,
             }
           : o,
@@ -701,11 +725,16 @@ export default function KasirScreen({
       setSelectedOrder({
         ...selectedOrder,
         status: "diproses",
-        kurirId: selectedKurirId,
-        kurirName: kurir?.name ?? "-",
+        kurirId: selectedKurirId || "",
+        kurirName: kurir?.name || "",
         catatanKasir: catatanKasirInput.trim() || selectedOrder.catatanKasir,
       });
-      Alert.alert("Berhasil ✅", "Pesanan dikonfirmasi.\nKurir: " + (kurir?.name ?? "-"));
+      Alert.alert(
+        "Pesanan Siap 📦",
+        selectedKurirId
+          ? "Pesanan dikonfirmasi untuk kurir: " + kurir?.name
+          : "Pesanan ditandai SIAP! Sekarang muncul di Dasbor Kurir untuk diambil kurir.",
+      );
     } catch { Alert.alert("Error", "Gagal konfirmasi pesanan."); }
     finally { setProcessingOrder(false); }
   };
@@ -1382,11 +1411,24 @@ export default function KasirScreen({
 
       {/* ════ Modal: Detail Order Online ═════════════════════════════════ */}
       <Modal visible={showOrderDetail} transparent animationType="slide" onRequestClose={() => setShowOrderDetail(false)}>
-        <Pressable style={S.overlay} onPress={() => setShowOrderDetail(false)}>
-          <Pressable style={S.orderDetailSheet} onPress={() => {}}>
+        <View style={S.overlay}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setShowOrderDetail(false)}
+          />
+          <View style={S.orderDetailSheet}>
             {selectedOrder !== null && (
               <>
-                <Text style={S.orderDetailTitle}>Detail Pesanan</Text>
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                  <Text style={[S.orderDetailTitle, { marginBottom: 0, flex: 1 }]}>Detail Pesanan</Text>
+                  <TouchableOpacity
+                    onPress={() => setShowOrderDetail(false)}
+                    style={{ paddingHorizontal: 12, paddingVertical: 4, backgroundColor: "#F1F5F9", borderRadius: 20 }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: "#64748B" }}>✕ Tutup</Text>
+                  </TouchableOpacity>
+                </View>
                 <View style={[S.orderStatusStrip, { backgroundColor: (ORDER_STATUS_COLOR[selectedOrder.status] ?? "#64748B") + "18" }]}>
                   <Text style={[S.orderStatusStripTxt, { color: ORDER_STATUS_COLOR[selectedOrder.status] ?? "#64748B" }]}>
                     {ORDER_STATUS_LABEL[selectedOrder.status] ?? selectedOrder.status}
@@ -1396,7 +1438,11 @@ export default function KasirScreen({
                   )}
                 </View>
 
-                <ScrollView showsVerticalScrollIndicator={false}>
+                <ScrollView
+                  showsVerticalScrollIndicator={true}
+                  contentContainerStyle={{ paddingBottom: 50 }}
+                  keyboardShouldPersistTaps="handled"
+                >
                   {/* Info customer */}
                   <View style={S.orderDetailCustomer}>
                     <Text style={S.orderDetailCustomerName}>{selectedOrder.customerName}</Text>
@@ -1482,16 +1528,57 @@ export default function KasirScreen({
                           <Text style={S.batalBtnTxt}>❌ Batalkan</Text>
                         </TouchableOpacity>
                         <TouchableOpacity
-                          style={[S.konfirmOrderBtn, (!selectedKurirId || processingOrder) && S.konfirmBtnDisabled]}
+                          style={[S.konfirmOrderBtn, processingOrder && S.konfirmBtnDisabled]}
                           onPress={handleKonfirmasiOrder}
-                          disabled={!selectedKurirId || processingOrder}
+                          disabled={processingOrder}
                         >
                           <Text style={S.konfirmOrderBtnTxt}>
-                            {processingOrder ? "Memproses..." : "✅ Konfirmasi & Kirim"}
+                            {processingOrder
+                              ? "Memproses..."
+                              : selectedKurirId
+                              ? "✅ Konfirmasi & Tugaskan Kurir"
+                              : "📦 Tandai Pesanan Siap (Muncul di Kurir)"}
                           </Text>
                         </TouchableOpacity>
                       </View>
                     </>
+                  )}
+
+                  {/* Info status diproses */}
+                  {selectedOrder.status === "diproses" && (
+                    <View style={{ backgroundColor: "#EFF6FF", padding: 12, borderRadius: 10, marginBottom: 12, borderWidth: 1, borderColor: "#BFDBFE" }}>
+                      <Text style={{ fontSize: 13, fontWeight: "700", color: "#1D4ED8" }}>
+                        {selectedOrder.kurirName && selectedOrder.kurirName !== "-" && selectedOrder.kurirName !== ""
+                          ? "🙋‍♂️ Order Diambil Kurir: " + selectedOrder.kurirName
+                          : "⏳ Pesanan SIAP — Menunggu kurir mengambil pesanan di Dasbor Kurir..."}
+                      </Text>
+                    </View>
+                  )}
+
+                  {/* Info status tertunda (Kendala Kirim dari Kurir) */}
+                  {selectedOrder.status === "tertunda" && (
+                    <View style={{ backgroundColor: "#FEF2F2", padding: 14, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: "#FECACA" }}>
+                      <Text style={{ fontSize: 14, fontWeight: "800", color: "#DC2626", marginBottom: 4 }}>
+                        {"⚠️ KENDALA PENGIRIMAN KURIR"}
+                      </Text>
+                      <Text style={{ fontSize: 13, color: "#991B1B", marginBottom: 12 }}>
+                        {"Alasan: " + (selectedOrder.kendalaKirim || "Rumah Kosong / Customer Tidak Ada")}
+                      </Text>
+                      <View style={{ flexDirection: "row", gap: 10 }}>
+                        <TouchableOpacity
+                          style={{ flex: 1, backgroundColor: "#DC2626", borderRadius: 10, paddingVertical: 10, alignItems: "center" }}
+                          onPress={() => handleUpdateOrderStatus(selectedOrder, "diproses")}
+                        >
+                          <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>{"🔄 Kirim Ulang (Siap Diambil)"}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={{ flex: 1, backgroundColor: "#FEE2E2", borderRadius: 10, paddingVertical: 10, alignItems: "center" }}
+                          onPress={() => handleBatalOrder(selectedOrder.id)}
+                        >
+                          <Text style={{ color: "#DC2626", fontWeight: "800", fontSize: 12 }}>{"❌ Batalkan Pesanan"}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
                   )}
 
                   {/* Tombol update status lanjutan */}
@@ -1518,17 +1605,34 @@ export default function KasirScreen({
                     </View>
                   )}
 
-                  {/* Info jika selesai — link ke riwayat */}
+                  {/* Info jika selesai + Bukti Foto Pengiriman */}
                   {selectedOrder.status === "selesai" && (
                     <View style={S.orderSelesaiInfo}>
                       <Text style={S.orderSelesaiTxt}>✅ Transaksi telah dicatat ke riwayat kasir.</Text>
+                      {selectedOrder.namaPenerima ? (
+                        <Text style={{ fontSize: 13, fontWeight: "700", color: "#166534", marginTop: 6 }}>
+                          {"👤 Diterima oleh: " + selectedOrder.namaPenerima}
+                        </Text>
+                      ) : null}
+                      {selectedOrder.fotoBuktiKirim ? (
+                        <View style={{ marginTop: 12, alignItems: "center" }}>
+                          <Text style={{ fontSize: 13, fontWeight: "800", color: "#15803D", marginBottom: 8 }}>
+                            {"📸 Bukti Foto Pengiriman Kurir"}
+                          </Text>
+                          <Image
+                            source={{ uri: selectedOrder.fotoBuktiKirim }}
+                            style={{ width: "100%", height: 180, borderRadius: 10, backgroundColor: "#E2E8F0" }}
+                            resizeMode="cover"
+                          />
+                        </View>
+                      ) : null}
                     </View>
                   )}
                 </ScrollView>
               </>
             )}
-          </Pressable>
-        </Pressable>
+          </View>
+        </View>
       </Modal>
 
       {/* ════ Modal: Retur ════════════════════════════════════════════════ */}
@@ -1618,9 +1722,15 @@ export default function KasirScreen({
         <Pressable style={S.overlay} onPress={() => setShowStruk(false)}>
           <Pressable style={S.strukSheet} onPress={() => {}}>
             <View style={S.strukHeader}>
-              <Text style={S.strukCheckmark}>✅</Text>
-              <Text style={S.strukSuccessTitle}>Transaksi Berhasil!</Text>
-              <Text style={S.strukTokoName}>{lastTx?.namaToko ?? namaToko}</Text>
+              <TwdLogoBadge size="small" showSubtitle={false} />
+              <Text style={{ fontSize: 13, fontWeight: "900", color: "#0F172A", letterSpacing: 1, marginTop: 4 }}>
+                {"TWD-MOBILE — BON PEMBAYARAN RESMI"}
+              </Text>
+              <Text style={S.strukSuccessTitle}>Transaksi Berhasil! ✅</Text>
+              <Text style={S.strukTokoName}>{"🏪 " + (lastTx?.namaToko ?? namaToko)}</Text>
+              <Text style={{ fontSize: 11, color: "#166534", fontWeight: "700", marginTop: 2 }}>
+                {"Kode Toko: TWD-" + (lastTx?.ownerId ?? "000000").slice(-6).toUpperCase()}
+              </Text>
             </View>
             {lastTx !== null && (
               <View style={S.strukBody}>

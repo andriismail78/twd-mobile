@@ -26,9 +26,12 @@ export type OrderItem = {
 };
 
 export type CustomerSession = {
-  name:    string;
-  phone:   string;
-  ownerId: string;
+  name:      string;
+  phone:     string;
+  ownerId:   string;
+  email?:    string;
+  address?:  string;
+  loginType?: "manual" | "google";
 };
 
 export type Order = {

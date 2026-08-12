@@ -2,13 +2,16 @@
 // v7 — fix logout (pakai logout() dari AuthContext), tambah tab GPS
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as ImagePicker from "expo-image-picker";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Image,
   Linking,
   Modal,
+  Platform,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -47,6 +50,7 @@ interface KurirAccount {
   id: string;
   ownerId: string;
   name: string;
+  nama?: string;
   phone?: string;
   verified: boolean;
   rating?: number;
@@ -171,12 +175,26 @@ const SWITCH_TRACK_COLOR = { false: "#e2e8f0", true: "#10b981" };
 function formatRp(n: number): string {
   return "Rp " + Math.round(n).toLocaleString("id-ID");
 }
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return (
-    d.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" }) +
-    " " + d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })
-  );
+function safeSlice(str?: string, len = -6, fallback = "0000") {
+  if (!str || typeof str !== "string") return fallback;
+  return str.slice(len).toUpperCase();
+}
+function formatDate(iso?: string): string {
+  if (!iso) return "-";
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return (
+      d.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" }) +
+      " " + d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })
+    );
+  } catch {
+    return iso;
+  }
+}
+function getTokoName(ownerId?: string, map: Record<string, string> = {}) {
+  if (!ownerId) return "Toko";
+  return map[ownerId] ?? "Toko #" + safeSlice(ownerId, -4, "0000");
 }
 function todayStr()     { return new Date().toISOString().slice(0, 10); }
 function thisMonthStr() { return new Date().toISOString().slice(0, 7); }
@@ -230,6 +248,12 @@ export default function KurirDashboard(props: KurirDashboardProps) {
   const [showWdModal,  setShowWdModal]  = useState(false);
   const [wdJumlah,     setWdJumlah]    = useState("");
 
+  // Bukti foto pengiriman
+  const [showBuktiModal, setShowBuktiModal] = useState(false);
+  const [selectedOrderBukti, setSelectedOrderBukti] = useState<OnlineOrder | null>(null);
+  const [fotoBuktiUri, setFotoBuktiUri] = useState<string>("");
+  const [submittingBukti, setSubmittingBukti] = useState(false);
+
   // ── Load store names ───────────────────────────────────────────────────
   const loadStoreNames = useCallback(async (ownerIds: string[]) => {
     const map: Record<string, string> = {};
@@ -238,9 +262,9 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         const raw = await AsyncStorage.getItem(STORE_PFX + oid);
         if (raw) {
           const info: StoreInfo = JSON.parse(raw);
-          map[oid] = info.namaToko ?? info.tokoName ?? "Toko #" + oid.slice(-4);
-        } else { map[oid] = "Toko #" + oid.slice(-4); }
-      } catch { map[oid] = "Toko #" + oid.slice(-4); }
+          map[oid] = info.namaToko ?? info.tokoName ?? "Toko #" + safeSlice(oid, -4, "0000");
+        } else { map[oid] = "Toko #" + safeSlice(oid, -4, "0000"); }
+      } catch { map[oid] = "Toko #" + safeSlice(oid, -4, "0000"); }
     }));
     setStoreNames(map);
   }, []);
@@ -259,7 +283,16 @@ export default function KurirDashboard(props: KurirDashboardProps) {
       const rawOrders = await AsyncStorage.getItem(ORDERS_KEY);
       const allOrders: OnlineOrder[] = rawOrders ? JSON.parse(rawOrders) : [];
       const myOrders = allOrders
-        .filter((o) => String(o.kurirId ?? "").trim() === resolvedKurirId)
+        .filter((o) => {
+          const matchId = String(o.kurirId ?? "").trim() === resolvedKurirId;
+          const matchName =
+            !!o.kurirName &&
+            !!(kurirInfo?.nama || kurirInfo?.name || (user as any)?.name) &&
+            String(o.kurirName).trim().toLowerCase() ===
+              String(kurirInfo?.nama || kurirInfo?.name || (user as any)?.name).trim().toLowerCase();
+          const isAssigned = o.status === "diproses" || o.status === "dikirim";
+          return matchId || matchName || isAssigned;
+        })
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       setOrders(myOrders);
 
@@ -335,12 +368,174 @@ export default function KurirDashboard(props: KurirDashboardProps) {
   function confirmUpdateStatus(order: OnlineOrder, newStatus: OnlineOrder["status"]) {
     Alert.alert(
       "Konfirmasi",
-      "Ubah #" + order.id.slice(-6).toUpperCase() + " → " + (STATUS_LABELS[newStatus] ?? newStatus) + "?",
+      "Ubah #" + safeSlice(order.id, -6, "ORDER") + " → " + (STATUS_LABELS[newStatus] ?? newStatus) + "?",
       [{ text: "Batal", style: "cancel" }, { text: "Ya", onPress: () => updateOrderStatus(order.id, newStatus) }],
     );
   }
 
   function openDetail(o: OnlineOrder) { setSelectedOrder(o); setDetailVisible(true); }
+
+  // ── Pemandu Arah Google Maps (Turn-by-Turn Driving Navigation) ─────────
+  function bukaNavigasiDashboard(address?: string) {
+    if (!address || !address.trim()) {
+      Alert.alert("Alamat Kosong", "Pesanan ini tidak memiliki alamat tujuan yang jelas.");
+      return;
+    }
+    const destination = encodeURIComponent(address.trim());
+    const googleMapsDirUrl = `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving`;
+
+    if (Platform.OS === "android") {
+      const androidNavIntent = `google.navigation:q=${destination}&mode=d`;
+      Linking.canOpenURL(androidNavIntent)
+        .then((ok) => {
+          if (ok) return Linking.openURL(androidNavIntent);
+          return Linking.openURL(googleMapsDirUrl);
+        })
+        .catch(() => Linking.openURL(googleMapsDirUrl));
+      return;
+    }
+
+    if (Platform.OS === "ios") {
+      const iosGoogleMaps = `comgooglemaps://?daddr=${destination}&directionsmode=driving`;
+      Linking.canOpenURL(iosGoogleMaps)
+        .then((ok) => {
+          if (ok) return Linking.openURL(iosGoogleMaps);
+          return Linking.openURL(googleMapsDirUrl);
+        })
+        .catch(() => Linking.openURL(googleMapsDirUrl));
+      return;
+    }
+
+    Linking.openURL(googleMapsDirUrl);
+  }
+
+  // ── 1. Kurir ambil orderan dari Kasir ─────────────────────────────────
+  async function handleAmbilOrder(order: OnlineOrder) {
+    try {
+      const raw = await AsyncStorage.getItem(ORDERS_KEY);
+      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
+      const myName = kurirInfo?.name || kurirInfo?.nama || (user as any)?.name || "Kurir";
+      const updated = all.map((o) =>
+        o.id === order.id
+          ? {
+              ...o,
+              kurirId: resolvedKurirId || "kurir_1",
+              kurirName: myName,
+              waktuDiambil: new Date().toISOString(),
+            }
+          : o,
+      );
+      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+      await loadData();
+      Alert.alert("Berhasil Diambil 🙋‍♂️", "Order pesanan untuk " + order.customerName + " telah Anda ambil!");
+    } catch {
+      Alert.alert("Error", "Gagal mengambil order.");
+    }
+  }
+
+  // ── 2. Kurir mulai antar / barang sudah dibawa dari toko ───────────────
+  async function handleMulaiAntar(order: OnlineOrder) {
+    Alert.alert(
+      "🚚 Mulai Antar Barang",
+      "Tandai bahwa barang pesanan untuk " + order.customerName + " sudah dibawa dari Kasir dan sedang dikirim?",
+      [
+        { text: "Batal", style: "cancel" },
+        {
+          text: "Ya, Mulai Antar",
+          onPress: async () => {
+            try {
+              const raw = await AsyncStorage.getItem(ORDERS_KEY);
+              const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
+              const updated = all.map((o) =>
+                o.id === order.id
+                  ? {
+                      ...o,
+                      status: "dikirim" as const,
+                      waktuDikirim: new Date().toISOString(),
+                    }
+                  : o,
+              );
+              await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+              await loadData();
+              Alert.alert("Status Diperbarui 🚚", "Barang ditandai sedang dikirim ke alamat customer.");
+            } catch {
+              Alert.alert("Error", "Gagal memperbarui status.");
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  // ── 3. Pilih foto bukti pengiriman (Kamera / Galeri) ───────────────────
+  async function pickBuktiFoto(source: "kamera" | "galeri") {
+    try {
+      if (source === "kamera") {
+        const perm = await ImagePicker.requestCameraPermissionsAsync();
+        if (perm.status !== "granted") {
+          Alert.alert("Izin Kamera", "Izin kamera diperlukan untuk mengambil foto bukti pengiriman.");
+          return;
+        }
+        const res = await ImagePicker.launchCameraAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.6,
+        });
+        if (!res.canceled && res.assets && res.assets.length > 0) {
+          setFotoBuktiUri(res.assets[0].uri);
+        }
+      } else {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (perm.status !== "granted") {
+          Alert.alert("Izin Galeri", "Izin galeri diperlukan untuk memilih foto bukti pengiriman.");
+          return;
+        }
+        const res = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.6,
+        });
+        if (!res.canceled && res.assets && res.assets.length > 0) {
+          setFotoBuktiUri(res.assets[0].uri);
+        }
+      }
+    } catch (e) {
+      console.error("pickBuktiFoto:", e);
+      Alert.alert("Error", "Gagal membuka kamera/galeri.");
+    }
+  }
+
+  // ── 4. Selesaikan pesanan beserta bukti foto ───────────────────────────
+  async function handleSelesaikanDenganBukti() {
+    if (!selectedOrderBukti) return;
+    if (!fotoBuktiUri) {
+      Alert.alert("Bukti Foto Wajib ⚠️", "Anda harus mengunggah bukti foto pengiriman barang sebelum pesanan diselesaikan.");
+      return;
+    }
+    setSubmittingBukti(true);
+    try {
+      const raw = await AsyncStorage.getItem(ORDERS_KEY);
+      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
+      const updated = all.map((o) =>
+        o.id === selectedOrderBukti.id
+          ? {
+              ...o,
+              status: "selesai" as const,
+              fotoBuktiKirim: fotoBuktiUri,
+              waktuSelesai: new Date().toISOString(),
+            }
+          : o,
+      );
+      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+      setShowBuktiModal(false);
+      setFotoBuktiUri("");
+      setSelectedOrderBukti(null);
+      await loadData();
+      Alert.alert("Pengiriman Selesai ✅", "Bukti foto pengiriman berhasil disimpan dan pesanan telah selesai.");
+    } catch {
+      Alert.alert("Error", "Gagal menyelesaikan pesanan.");
+    } finally {
+      setSubmittingBukti(false);
+    }
+  }
 
   function handleCall(phone: string) {
     Linking.canOpenURL("tel:" + phone).then((can) => {
@@ -370,8 +565,8 @@ export default function KurirDashboard(props: KurirDashboardProps) {
   const pendingWd       = useMemo(() => withdrawals.filter((w) => w.status === "menunggu" || w.status === "diproses").reduce((s, w) => s + w.jumlah, 0), [withdrawals]);
   const saldoBisa       = useMemo(() => Math.max(0, totalEarned - totalWithdrawn - pendingWd), [totalEarned, totalWithdrawn, pendingWd]);
 
-  const ordersToday     = useMemo(() => completedOrders.filter((o) => o.createdAt.slice(0, 10) === todayStr()), [completedOrders]);
-  const ordersThisMonth = useMemo(() => completedOrders.filter((o) => o.createdAt.slice(0, 7) === thisMonthStr()), [completedOrders]);
+  const ordersToday     = useMemo(() => completedOrders.filter((o) => (o.createdAt || "").slice(0, 10) === todayStr()), [completedOrders]);
+  const ordersThisMonth = useMemo(() => completedOrders.filter((o) => (o.createdAt || "").slice(0, 7) === thisMonthStr()), [completedOrders]);
   const saldoToday      = useMemo(() => ordersToday.reduce((s, o) => s + getOrderEarning(o).kurirNet, 0), [ordersToday]);
   const saldoMonth      = useMemo(() => ordersThisMonth.reduce((s, o) => s + getOrderEarning(o).kurirNet, 0), [ordersThisMonth]);
   const successRate     = useMemo(() => {
@@ -599,7 +794,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
             withdrawals.map((wd) => (
               <View key={wd.id} style={S.wdItemCard}>
                 <View style={S.wdItemLeft}>
-                  <Text style={S.wdItemId}>{"#" + wd.id.slice(-8).toUpperCase()}</Text>
+                  <Text style={S.wdItemId}>{"#" + safeSlice(wd.id, -8, "WD")}</Text>
                   <Text style={S.wdItemBank}>{wd.namaBank + " · " + wd.nomorRekening}</Text>
                   <Text style={S.wdItemOwner}>{"a.n. " + wd.namaPemilik}</Text>
                   <Text style={S.wdItemDate}>{formatDate(wd.createdAt)}</Text>
@@ -654,9 +849,9 @@ export default function KurirDashboard(props: KurirDashboardProps) {
               return (
                 <View key={order.id} style={S.earningsItemCard}>
                   <View style={S.earningsItemLeft}>
-                    <Text style={S.earningsItemId}>{"#" + order.id.slice(-6).toUpperCase()}</Text>
+                    <Text style={S.earningsItemId}>{"#" + safeSlice(order.id, -6, "ORDER")}</Text>
                     <Text style={S.earningsItemCustomer}>{order.customerName}</Text>
-                    <Text style={S.earningsItemToko}>{"🏪 " + (storeNames[order.ownerId] ?? "Toko #" + order.ownerId.slice(-4))}</Text>
+                    <Text style={S.earningsItemToko}>{"🏪 " + getTokoName(order.ownerId, storeNames)}</Text>
                     <Text style={S.earningsItemJarak}>{"📍 " + earn.jarakKm + " km" + (order.jarakKm ? "" : " (estimasi)")}</Text>
                     <Text style={S.earningsItemDate}>{formatDate(order.createdAt)}</Text>
                     <View style={S.breakdownRow}><Text style={S.breakdownLbl}>{"Ongkir kotor"}</Text><Text style={S.breakdownVal}>{formatRp(earn.gross)}</Text></View>
@@ -695,11 +890,11 @@ export default function KurirDashboard(props: KurirDashboardProps) {
                 return (
                   <TouchableOpacity style={S.orderCard} onPress={() => openDetail(item)} activeOpacity={0.85}>
                     <View style={S.tokoStrip}>
-                      <Text style={S.tokoStripTxt}>{"🏪 " + (storeNames[item.ownerId] ?? "Toko #" + item.ownerId.slice(-4))}</Text>
+                      <Text style={S.tokoStripTxt}>{"🏪 " + getTokoName(item.ownerId, storeNames)}</Text>
                       <Text style={S.earningBadge}>{"+" + formatRp(earn.kurirNet)}</Text>
                     </View>
                     <View style={S.orderCardTop}>
-                      <Text style={S.orderId}>{"#" + item.id.slice(-6).toUpperCase()}</Text>
+                      <Text style={S.orderId}>{"#" + safeSlice(item.id, -6, "ORDER")}</Text>
                       <View style={[S.statusBadge, getStatusBg(item.status)]}><Text style={S.statusBadgeText}>{STATUS_LABELS[item.status] ?? item.status}</Text></View>
                     </View>
                     <Text style={S.customerName}>{item.customerName}</Text>
@@ -709,15 +904,49 @@ export default function KurirDashboard(props: KurirDashboardProps) {
                         <View style={S.callBadge}><Text style={S.callBadgeTxt}>{"Telpon"}</Text></View>
                       </TouchableOpacity>
                     )}
-                    {Boolean(item.customerAddress) && <Text style={S.address} numberOfLines={2}>{"📍 " + item.customerAddress}</Text>}
-                    <Text style={S.jarakTxt}>{"🗺 " + earn.jarakKm + " km · bersih " + formatRp(earn.kurirNet)}</Text>
+                    <View style={{ backgroundColor: "#EFF6FF", borderRadius: 10, padding: 10, marginTop: 8, marginBottom: 8, borderWidth: 1, borderColor: "#BFDBFE" }}>
+                      <Text style={{ fontSize: 11, fontWeight: "800", color: "#1E40AF", marginBottom: 2 }}>{"📍 TUJUAN PENGIRIMAN:"}</Text>
+                      <Text style={{ fontSize: 13, fontWeight: "700", color: "#1E293B", lineHeight: 18 }}>
+                        {item.customerAddress || "Alamat tidak dicantumkan (Hubungi Customer)"}
+                      </Text>
+                      {Boolean(item.customerAddress) && (
+                        <TouchableOpacity
+                          style={{ marginTop: 8, backgroundColor: "#2563EB", borderRadius: 8, paddingVertical: 8, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 6 }}
+                          onPress={(e) => {
+                            e.stopPropagation();
+                            bukaNavigasiDashboard(item.customerAddress);
+                          }}
+                        >
+                          <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>{"🗺 Buka Pemandu Arah (Google Maps)"}</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                    <Text style={S.jarakTxt}>{"📏 Jarak " + earn.jarakKm + " km · bersih " + formatRp(earn.kurirNet)}</Text>
                     <View style={S.orderCardBottom}>
                       <Text style={S.orderTotal}>{formatRp(item.total)}</Text>
                       <Text style={S.orderDate}>{formatDate(item.createdAt)}</Text>
                     </View>
                     {Boolean(item.catatanKasir) && <View style={S.catatanKasirStrip}><Text style={S.catatanKasirStripTxt} numberOfLines={1}>{"🗒 " + item.catatanKasir}</Text></View>}
-                    {item.status === "diproses" && <TouchableOpacity style={S.actionBtn} onPress={() => confirmUpdateStatus(item, "dikirim")}><Text style={S.actionBtnText}>{"🚚 Mulai Kirim →"}</Text></TouchableOpacity>}
-                    {item.status === "dikirim" && <TouchableOpacity style={S.actionBtnGreen} onPress={() => confirmUpdateStatus(item, "selesai")}><Text style={S.actionBtnText}>{"✅ Konfirmasi Selesai"}</Text></TouchableOpacity>}
+                    {item.status === "diproses" && (!item.kurirId || String(item.kurirId).trim() === "") ? (
+                      <TouchableOpacity style={S.actionBtn} onPress={() => handleAmbilOrder(item)}>
+                        <Text style={S.actionBtnText}>{"🙋‍♂️ Ambil Orderan"}</Text>
+                      </TouchableOpacity>
+                    ) : item.status === "diproses" ? (
+                      <TouchableOpacity style={[S.actionBtn, { backgroundColor: "#4338CA" }]} onPress={() => handleMulaiAntar(item)}>
+                        <Text style={S.actionBtnText}>{"🚚 Barang Dibawa (Mulai Antar)"}</Text>
+                      </TouchableOpacity>
+                    ) : item.status === "dikirim" ? (
+                      <TouchableOpacity
+                        style={S.actionBtnGreen}
+                        onPress={() => {
+                          setSelectedOrderBukti(item);
+                          setFotoBuktiUri("");
+                          setShowBuktiModal(true);
+                        }}
+                      >
+                        <Text style={S.actionBtnText}>{"📸 Upload Bukti & Selesai"}</Text>
+                      </TouchableOpacity>
+                    ) : null}
                   </TouchableOpacity>
                 );
               }}
@@ -738,12 +967,12 @@ export default function KurirDashboard(props: KurirDashboardProps) {
             return (
               <ScrollView style={S.modalBody} showsVerticalScrollIndicator={false}>
                 <View style={S.modalTokoEarningRow}>
-                  <View style={S.modalTokoStrip}><Text style={S.modalTokoTxt}>{"🏪 " + (storeNames[selectedOrder.ownerId] ?? "Toko #" + selectedOrder.ownerId.slice(-4))}</Text></View>
+                  <View style={S.modalTokoStrip}><Text style={S.modalTokoTxt}>{"🏪 " + getTokoName(selectedOrder.ownerId, storeNames)}</Text></View>
                   <View style={S.modalEarningBadge}><Text style={S.modalEarningTxt}>{"+" + formatRp(earn.kurirNet)}</Text></View>
                 </View>
                 <View style={[S.detailStatusStrip, getStatusBg(selectedOrder.status)]}><Text style={S.detailStatusStripTxt}>{STATUS_LABELS[selectedOrder.status] ?? selectedOrder.status}</Text></View>
                 <Text style={S.detailSection}>{"INFO PESANAN"}</Text>
-                <Text style={S.detailRow}>{"ID: #" + selectedOrder.id.slice(-6).toUpperCase()}</Text>
+                <Text style={S.detailRow}>{"ID: #" + safeSlice(selectedOrder.id, -6, "ORDER")}</Text>
                 <Text style={S.detailRow}>{"Tanggal: " + formatDate(selectedOrder.createdAt)}</Text>
                 <Text style={S.detailRow}>{"Pembayaran: " + (selectedOrder.metodeBayar ?? "-").toUpperCase()}</Text>
                 <Text style={S.detailSection}>{"RINCIAN ONGKIR"}</Text>
@@ -765,14 +994,46 @@ export default function KurirDashboard(props: KurirDashboardProps) {
                     <View style={S.callBadge}><Text style={S.callBadgeTxt}>{"Telpon"}</Text></View>
                   </TouchableOpacity>
                 )}
-                {Boolean(selectedOrder.customerAddress) && <Text style={S.detailRow}>{"📍 " + selectedOrder.customerAddress}</Text>}
+                <View style={{ backgroundColor: "#EFF6FF", borderRadius: 12, padding: 12, marginTop: 8, marginBottom: 12, borderWidth: 1, borderColor: "#BFDBFE" }}>
+                  <Text style={{ fontSize: 12, fontWeight: "800", color: "#1E40AF", marginBottom: 4 }}>{"📍 TUJUAN PENGIRIMAN:"}</Text>
+                  <Text style={{ fontSize: 14, fontWeight: "700", color: "#1E293B", lineHeight: 20 }}>
+                    {selectedOrder.customerAddress || "Alamat tidak dicantumkan (Hubungi Customer)"}
+                  </Text>
+                  {Boolean(selectedOrder.customerAddress) && (
+                    <TouchableOpacity
+                      style={{ marginTop: 10, backgroundColor: "#2563EB", borderRadius: 10, paddingVertical: 10, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 6 }}
+                      onPress={() => bukaNavigasiDashboard(selectedOrder.customerAddress)}
+                    >
+                      <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>{"🗺 Buka Pemandu Arah (Google Maps)"}</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
                 <Text style={S.detailSection}>{"ITEM PESANAN"}</Text>
                 {selectedOrder.items.map((it, idx) => <Text key={String(idx)} style={S.detailRow}>{it.qty + "x " + it.name + " — " + formatRp(it.price * it.qty)}</Text>)}
                 <View style={S.totalRow}><Text style={S.totalLabel}>{"Total Pesanan"}</Text><Text style={S.totalValue}>{formatRp(selectedOrder.total)}</Text></View>
                 {Boolean(selectedOrder.note) && (<><Text style={S.detailSection}>{"CATATAN CUSTOMER"}</Text><View style={S.noteBox}><Text style={S.noteBoxTxt}>{selectedOrder.note}</Text></View></>)}
                 {Boolean(selectedOrder.catatanKasir) && (<><Text style={S.detailSection}>{"CATATAN KASIR"}</Text><View style={S.catatanKasirBox}><Text style={S.catatanKasirBoxTxt}>{selectedOrder.catatanKasir}</Text></View></>)}
-                {selectedOrder.status === "diproses" && <TouchableOpacity style={S.actionBtnModal} onPress={() => confirmUpdateStatus(selectedOrder, "dikirim")}><Text style={S.actionBtnText}>{"🚚 Mulai Kirim →"}</Text></TouchableOpacity>}
-                {selectedOrder.status === "dikirim" && <TouchableOpacity style={S.actionBtnModalGreen} onPress={() => confirmUpdateStatus(selectedOrder, "selesai")}><Text style={S.actionBtnText}>{"✅ Konfirmasi Selesai"}</Text></TouchableOpacity>}
+                {selectedOrder.status === "diproses" && (!selectedOrder.kurirId || String(selectedOrder.kurirId).trim() === "") ? (
+                  <TouchableOpacity style={S.actionBtnModal} onPress={() => handleAmbilOrder(selectedOrder)}>
+                    <Text style={S.actionBtnText}>{"🙋‍♂️ Ambil Orderan Ini"}</Text>
+                  </TouchableOpacity>
+                ) : selectedOrder.status === "diproses" ? (
+                  <TouchableOpacity style={[S.actionBtnModal, { backgroundColor: "#4338CA" }]} onPress={() => handleMulaiAntar(selectedOrder)}>
+                    <Text style={S.actionBtnText}>{"🚚 Barang Dibawa (Mulai Antar)"}</Text>
+                  </TouchableOpacity>
+                ) : selectedOrder.status === "dikirim" ? (
+                  <TouchableOpacity
+                    style={S.actionBtnModalGreen}
+                    onPress={() => {
+                      setDetailVisible(false);
+                      setSelectedOrderBukti(selectedOrder);
+                      setFotoBuktiUri("");
+                      setShowBuktiModal(true);
+                    }}
+                  >
+                    <Text style={S.actionBtnText}>{"📸 Upload Bukti & Selesai"}</Text>
+                  </TouchableOpacity>
+                ) : null}
                 {selectedOrder.status === "selesai" && <View style={S.selesaiInfo}><Text style={S.selesaiInfoTxt}>{"✅ Selesai · Pendapatan: " + formatRp(earn.kurirNet)}</Text></View>}
                 {selectedOrder.status === "dibatalkan" && <View style={S.batalInfo}><Text style={S.batalInfoTxt}>{"❌ Pesanan ini dibatalkan."}</Text></View>}
                 <View style={S.modalBottomSpacer} />
@@ -791,17 +1052,37 @@ export default function KurirDashboard(props: KurirDashboardProps) {
               <TouchableOpacity onPress={() => setShowBankModal(false)}><Text style={S.bankModalClose}>{"✕"}</Text></TouchableOpacity>
             </View>
             <ScrollView showsVerticalScrollIndicator={false}>
-              <Text style={S.bankFieldLbl}>{"Nama Bank"}</Text>
-              <TextInput style={S.bankInput} value={bankInput.namaBank} onChangeText={(v) => setBankInput((p) => ({ ...p, namaBank: v }))} placeholder="BCA, BRI, BNI, Mandiri, dll" placeholderTextColor="#94a3b8" autoCapitalize="characters" />
-              <Text style={S.bankFieldLbl}>{"Nomor Rekening"}</Text>
-              <TextInput style={S.bankInput} value={bankInput.nomorRekening} onChangeText={(v) => setBankInput((p) => ({ ...p, nomorRekening: v }))} placeholder="1234567890" placeholderTextColor="#94a3b8" keyboardType="numeric" />
-              <Text style={S.bankFieldLbl}>{"Nama Pemilik Rekening"}</Text>
-              <TextInput style={S.bankInput} value={bankInput.namaPemilik} onChangeText={(v) => setBankInput((p) => ({ ...p, namaPemilik: v }))} placeholder="Sesuai buku tabungan" placeholderTextColor="#94a3b8" autoCapitalize="words" />
+              <Text style={S.bankFieldLbl}>{"Bank / e-Wallet Tujuan"}</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                {["BCA", "BRI", "BNI", "MANDIRI", "DANA", "GOPAY", "OVO", "SHOPEEPAY"].map((bank) => (
+                  <TouchableOpacity
+                    key={bank}
+                    style={{
+                      backgroundColor: bankInput.namaBank === bank ? "#EEF2FF" : "#F8FAFC",
+                      borderRadius: 12,
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      borderWidth: 1,
+                      borderColor: bankInput.namaBank === bank ? "#6366F1" : "#E2E8F0",
+                    }}
+                    onPress={() => setBankInput((p) => ({ ...p, namaBank: bank }))}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: bankInput.namaBank === bank ? "800" : "600", color: bankInput.namaBank === bank ? "#4338CA" : "#64748B" }}>
+                      {(["DANA", "GOPAY", "OVO", "SHOPEEPAY"].includes(bank) ? "📱 " : "🏦 ") + bank}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <TextInput style={S.bankInput} value={bankInput.namaBank} onChangeText={(v) => setBankInput((p) => ({ ...p, namaBank: v }))} placeholder="Nama Bank atau e-Wallet (contoh: DANA / BCA)" placeholderTextColor="#94a3b8" autoCapitalize="characters" />
+              <Text style={S.bankFieldLbl}>{"No. Rekening / No. HP e-Wallet"}</Text>
+              <TextInput style={S.bankInput} value={bankInput.nomorRekening} onChangeText={(v) => setBankInput((p) => ({ ...p, nomorRekening: v }))} placeholder="081234567890 (e-Wallet) / 1234567890 (Bank)" placeholderTextColor="#94a3b8" keyboardType="numeric" />
+              <Text style={S.bankFieldLbl}>{"Nama Pemilik Akun / Rekening"}</Text>
+              <TextInput style={S.bankInput} value={bankInput.namaPemilik} onChangeText={(v) => setBankInput((p) => ({ ...p, namaPemilik: v }))} placeholder="Sesuai nama terdaftar di e-Wallet / buku tabungan" placeholderTextColor="#94a3b8" autoCapitalize="words" />
               <View style={S.bankWarningBox}>
-                <Text style={S.bankWarningTxt}>{"⚠️ Pastikan data rekening benar. Dana yang salah transfer tidak dapat dikembalikan."}</Text>
+                <Text style={S.bankWarningTxt}>{"⚠️ Pastikan data nomor rekening/e-Wallet benar. Dana yang salah transfer tidak dapat dikembalikan."}</Text>
               </View>
               <TouchableOpacity style={S.bankSaveBtn} onPress={handleSaveBank}>
-                <Text style={S.bankSaveBtnTxt}>{"💾 Simpan Rekening"}</Text>
+                <Text style={S.bankSaveBtnTxt}>{"💾 Simpan Rekening / e-Wallet"}</Text>
               </TouchableOpacity>
             </ScrollView>
           </View>
@@ -854,6 +1135,86 @@ export default function KurirDashboard(props: KurirDashboardProps) {
             >
               <Text style={S.bankSaveBtnTxt}>{"💸 Ajukan Pencairan"}</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Modal Bukti Foto Pengiriman ── */}
+      <Modal
+        visible={showBuktiModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowBuktiModal(false)}
+      >
+        <View style={S.modalOverlay}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setShowBuktiModal(false)}
+          />
+          <View style={S.buktiModalSheet}>
+            <Text style={S.modalTitle}>{"📸 Bukti Foto Pengiriman"}</Text>
+            <Text style={{ fontSize: 13, color: "#64748B", textAlign: "center", marginBottom: 16 }}>
+              {"Harus disertai bukti foto pengiriman barang untuk pesanan atas nama: " +
+                (selectedOrderBukti?.customerName ?? "")}
+            </Text>
+
+            {fotoBuktiUri ? (
+              <View style={S.buktiPreviewBox}>
+                <Image
+                  source={{ uri: fotoBuktiUri }}
+                  style={S.buktiImg}
+                  resizeMode="cover"
+                />
+                <TouchableOpacity
+                  style={S.gantiFotoBtn}
+                  onPress={() => setFotoBuktiUri("")}
+                >
+                  <Text style={S.gantiFotoTxt}>{"❌ Hapus & Ulangi Foto"}</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={S.fotoBtnRow}>
+                <TouchableOpacity
+                  style={S.kameraBtn}
+                  onPress={() => pickBuktiFoto("kamera")}
+                >
+                  <Text style={S.fotoBtnIcon}>{"📷"}</Text>
+                  <Text style={S.fotoBtnLabel}>{"Ambil dari Kamera"}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={S.galeriBtn}
+                  onPress={() => pickBuktiFoto("galeri")}
+                >
+                  <Text style={S.fotoBtnIcon}>{"🖼️"}</Text>
+                  <Text style={S.fotoBtnLabel}>{"Pilih dari Galeri"}</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            <View style={S.modalActionRow}>
+              <TouchableOpacity
+                style={S.modalBatalBtn}
+                onPress={() => {
+                  setShowBuktiModal(false);
+                  setFotoBuktiUri("");
+                }}
+              >
+                <Text style={S.modalBatalTxt}>{"Batal"}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  S.modalSimpanBtn,
+                  (!fotoBuktiUri || submittingBukti) && { opacity: 0.5 },
+                ]}
+                disabled={!fotoBuktiUri || submittingBukti}
+                onPress={handleSelesaikanDenganBukti}
+              >
+                <Text style={S.modalSimpanTxt}>
+                  {submittingBukti ? "Menyimpan..." : "✅ Kirim Bukti & Selesai"}
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -1105,4 +1466,20 @@ const S = StyleSheet.create({
 
   btnPurple:    { marginTop: 20, backgroundColor: "#6366f1", borderRadius: 10, paddingHorizontal: 24, paddingVertical: 12 },
   btnPurpleTxt: { color: "#fff", fontWeight: "700", fontSize: 14 },
+
+  buktiModalSheet:    { backgroundColor: "#fff", borderRadius: 24, padding: 20, margin: 20, elevation: 10, width: "90%", maxWidth: 400 },
+  fotoBtnRow:         { flexDirection: "row", gap: 12, marginBottom: 20 },
+  kameraBtn:          { flex: 1, backgroundColor: "#EEF2FF", borderRadius: 14, padding: 16, alignItems: "center", borderWidth: 1, borderColor: "#C7D2FE" },
+  galeriBtn:          { flex: 1, backgroundColor: "#F0FDF4", borderRadius: 14, padding: 16, alignItems: "center", borderWidth: 1, borderColor: "#BBF7D0" },
+  fotoBtnIcon:        { fontSize: 28, marginBottom: 6 },
+  fotoBtnLabel:       { fontSize: 13, fontWeight: "700", color: "#334155", textAlign: "center" },
+  buktiPreviewBox:    { alignItems: "center", marginBottom: 18 },
+  buktiImg:           { width: "100%", height: 200, borderRadius: 12, marginBottom: 10, backgroundColor: "#F1F5F9" },
+  gantiFotoBtn:       { backgroundColor: "#FEE2E2", paddingHorizontal: 14, paddingVertical: 8, borderRadius: 10 },
+  gantiFotoTxt:       { color: "#DC2626", fontSize: 12, fontWeight: "700" },
+  modalActionRow:     { flexDirection: "row", gap: 10 },
+  modalBatalBtn:      { flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: "#F1F5F9", alignItems: "center" },
+  modalBatalTxt:      { fontSize: 14, fontWeight: "700", color: "#64748B" },
+  modalSimpanBtn:     { flex: 2, paddingVertical: 14, borderRadius: 12, backgroundColor: "#10B981", alignItems: "center" },
+  modalSimpanTxt:     { fontSize: 14, fontWeight: "800", color: "#fff" },
 });

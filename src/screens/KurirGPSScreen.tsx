@@ -3,17 +3,22 @@
 // Dependency: expo-location (install: npx expo install expo-location)
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Haptics from "expo-haptics";
+import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
+    Image,
     Linking,
+    Modal,
     Platform,
     RefreshControl,
     ScrollView,
     StyleSheet,
     Text,
+    TextInput,
     TouchableOpacity,
     View,
 } from "react-native";
@@ -30,12 +35,19 @@ interface OnlineOrder {
   items: Array<{ productId: string; name: string; price: number; qty: number }>;
   subtotal: number;
   total: number;
-  status: "menunggu" | "diproses" | "dikirim" | "selesai" | "dibatalkan";
+  status: "menunggu" | "diproses" | "dikirim" | "selesai" | "dibatalkan" | "tertunda";
   kurirId?: string;
   kurirName?: string;
   metodeBayar?: string;
   createdAt: string;
   note?: string;
+  fotoBuktiKirim?: string;
+  namaPenerima?: string;
+  kendalaKirim?: string;
+  waktuDiambil?: string;
+  waktuDikirim?: string;
+  waktuSelesai?: string;
+  waktuKendala?: string;
 }
 
 interface StoreInfo {
@@ -112,27 +124,42 @@ function formatJarak(km: number): string {
   return km.toFixed(1) + " km";
 }
 
-// Buka Google Maps / Apple Maps ke alamat
+// Buka Google Maps Turn-by-Turn Navigation (Pemandu Arah Rute Google Maps)
 function bukaNavigasi(address: string, lat?: number, lng?: number) {
-  let url: string;
-  if (lat && lng) {
-    url = Platform.OS === "ios"
-      ? "maps://?daddr=" + lat + "," + lng
-      : "geo:" + lat + "," + lng + "?q=" + encodeURIComponent(address);
-  } else {
-    const q = encodeURIComponent(address);
-    url = Platform.OS === "ios"
-      ? "maps://?q=" + q
-      : "https://maps.google.com/?q=" + q;
+  const destination = lat && lng ? `${lat},${lng}` : encodeURIComponent(address);
+  const googleMapsDirUrl = `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving`;
+
+  if (Platform.OS === "android") {
+    const androidNavIntent = `google.navigation:q=${destination}&mode=d`;
+    Linking.canOpenURL(androidNavIntent)
+      .then((ok) => {
+        if (ok) {
+          return Linking.openURL(androidNavIntent);
+        }
+        return Linking.openURL(googleMapsDirUrl);
+      })
+      .catch(() => {
+        Linking.openURL(googleMapsDirUrl);
+      });
+    return;
   }
-  Linking.canOpenURL(url).then((ok) => {
-    if (ok) {
-      Linking.openURL(url);
-    } else {
-      // Fallback Google Maps web
-      Linking.openURL("https://maps.google.com/?q=" + encodeURIComponent(address));
-    }
-  });
+
+  if (Platform.OS === "ios") {
+    const iosGoogleMaps = `comgooglemaps://?daddr=${destination}&directionsmode=driving`;
+    Linking.canOpenURL(iosGoogleMaps)
+      .then((ok) => {
+        if (ok) {
+          return Linking.openURL(iosGoogleMaps);
+        }
+        return Linking.openURL(googleMapsDirUrl);
+      })
+      .catch(() => {
+        Linking.openURL(googleMapsDirUrl);
+      });
+    return;
+  }
+
+  Linking.openURL(googleMapsDirUrl);
 }
 
 // Buka telepon
@@ -158,6 +185,22 @@ export default function KurirGPSScreen({ kurirId, onBack }: KurirGPSScreenProps)
   const [orders,      setOrders]      = useState<OrderWithDistance[]>([]);
   const [loadingOrder,setLoadingOrder] = useState(true);
   const [refreshing,  setRefreshing]  = useState(false);
+
+  // ── State upload bukti foto ───────────────────────────────────────────
+  const [showBuktiModal, setShowBuktiModal] = useState(false);
+  const [selectedOrderBukti, setSelectedOrderBukti] = useState<OrderWithDistance | null>(null);
+  const [fotoBuktiUri, setFotoBuktiUri] = useState<string>("");
+  const [namaPenerima, setNamaPenerima] = useState("YBS (Customer)");
+  const [submittingBukti, setSubmittingBukti] = useState(false);
+
+  // ── State kendala pengantaran ─────────────────────────────────────────
+  const [showKendalaModal, setShowKendalaModal] = useState(false);
+  const [selectedOrderKendala, setSelectedOrderKendala] = useState<OrderWithDistance | null>(null);
+  const [alasanKendala, setAlasanKendala] = useState("Rumah Kosong / Tidak Ada Orang");
+
+  // ── State alert suara/haptics order baru ──────────────────────────────
+  const [showNewOrderAlert, setShowNewOrderAlert] = useState(false);
+  const prevOrderCountRef = useRef(0);
 
   const watchRef = useRef<Location.LocationSubscription | null>(null);
 
@@ -233,11 +276,11 @@ export default function KurirGPSScreen({ kurirId, onBack }: KurirGPSScreenProps)
       const raw = await AsyncStorage.getItem(ORDERS_KEY);
       const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
 
-      // Filter: order milik kurir ini, status aktif
+      // Filter: order aktif diproses atau dikirim untuk pengantaran kurir
       const mine = all.filter(
         (o) =>
-          String(o.kurirId ?? "") === resolvedKurirId &&
-          (o.status === "diproses" || o.status === "dikirim"),
+          o.status === "diproses" || o.status === "dikirim" ||
+          String(o.kurirId ?? "") === resolvedKurirId,
       );
 
       // Ambil nama toko per ownerId
@@ -280,6 +323,17 @@ export default function KurirGPSScreen({ kurirId, onBack }: KurirGPSScreenProps)
       });
 
       setOrders(enriched);
+
+      // ── Deteksi order baru siap dijemput ──
+      const siapDiambilCount = enriched.filter(
+        (o) => o.status === "diproses" && (!o.kurirId || !String(o.kurirId).trim()),
+      ).length;
+      if (siapDiambilCount > prevOrderCountRef.current && prevOrderCountRef.current > 0) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        setShowNewOrderAlert(true);
+        setTimeout(() => setShowNewOrderAlert(false), 5000);
+      }
+      prevOrderCountRef.current = siapDiambilCount;
     } catch (e) {
       console.error("KurirGPS loadOrders:", e);
     } finally {
@@ -325,6 +379,189 @@ export default function KurirGPSScreen({ kurirId, onBack }: KurirGPSScreenProps)
         { text: labels[newStatus], onPress: () => updateStatus(order.id, newStatus) },
       ],
     );
+  }
+
+  // ── 1. Kurir ambil orderan dari Kasir ─────────────────────────────────
+  async function handleAmbilOrder(order: OrderWithDistance) {
+    try {
+      const raw = await AsyncStorage.getItem(ORDERS_KEY);
+      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
+      const myName = user?.name || "Kurir";
+      const updated = all.map((o) =>
+        o.id === order.id
+          ? {
+              ...o,
+              kurirId: resolvedKurirId || "kurir_1",
+              kurirName: myName,
+              waktuDiambil: new Date().toISOString(),
+            }
+          : o,
+      );
+      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+      await loadOrders();
+      Alert.alert("Berhasil Diambil 🙋‍♂️", "Order pesanan atas nama " + order.customerName + " telah Anda ambil! Silakan ambil barang dari Kasir/Toko.");
+    } catch {
+      Alert.alert("Error", "Gagal mengambil order.");
+    }
+  }
+
+  // ── 2. Kurir mulai antar / barang sudah dibawa dari toko ───────────────
+  async function handleMulaiAntar(order: OrderWithDistance) {
+    Alert.alert(
+      "🚚 Mulai Antar Barang",
+      "Tandai bahwa barang pesanan untuk " + order.customerName + " sudah dibawa dan sedang dikirim?",
+      [
+        { text: "Batal", style: "cancel" },
+        {
+          text: "Ya, Mulai Antar",
+          onPress: async () => {
+            try {
+              const raw = await AsyncStorage.getItem(ORDERS_KEY);
+              const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
+              const updated = all.map((o) =>
+                o.id === order.id
+                  ? {
+                      ...o,
+                      status: "dikirim" as const,
+                      waktuDikirim: new Date().toISOString(),
+                    }
+                  : o,
+              );
+              await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+              await loadOrders();
+              Alert.alert("Status Diperbarui 🚚", "Barang ditandai sedang dikirim ke alamat customer.");
+            } catch {
+              Alert.alert("Error", "Gagal memperbarui status.");
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  // ── 3. Pilih foto bukti pengiriman (Kamera / Galeri) ───────────────────
+  async function pickBuktiFoto(source: "kamera" | "galeri") {
+    try {
+      if (source === "kamera") {
+        const perm = await ImagePicker.requestCameraPermissionsAsync();
+        if (perm.status !== "granted") {
+          Alert.alert("Izin Kamera", "Izin kamera diperlukan untuk mengambil foto bukti pengiriman.");
+          return;
+        }
+        const res = await ImagePicker.launchCameraAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.6,
+        });
+        if (!res.canceled && res.assets && res.assets.length > 0) {
+          setFotoBuktiUri(res.assets[0].uri);
+        }
+      } else {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (perm.status !== "granted") {
+          Alert.alert("Izin Galeri", "Izin galeri diperlukan untuk memilih foto bukti pengiriman.");
+          return;
+        }
+        const res = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.6,
+        });
+        if (!res.canceled && res.assets && res.assets.length > 0) {
+          setFotoBuktiUri(res.assets[0].uri);
+        }
+      }
+    } catch (e) {
+      console.error("pickBuktiFoto:", e);
+      Alert.alert("Error", "Gagal membuka kamera/galeri.");
+    }
+  }
+
+  // ── 4. Selesaikan pesanan beserta bukti foto ───────────────────────────
+  async function handleSelesaikanDenganBukti() {
+    if (!selectedOrderBukti) return;
+    if (!fotoBuktiUri) {
+      Alert.alert("Bukti Foto Wajib ⚠️", "Anda harus mengunggah bukti foto pengiriman barang sebelum pesanan diselesaikan.");
+      return;
+    }
+    setSubmittingBukti(true);
+    try {
+      const raw = await AsyncStorage.getItem(ORDERS_KEY);
+      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
+      const updated = all.map((o) =>
+        o.id === selectedOrderBukti.id
+          ? {
+              ...o,
+              status: "selesai" as const,
+              fotoBuktiKirim: fotoBuktiUri,
+              namaPenerima: namaPenerima || "YBS (Customer)",
+              waktuSelesai: new Date().toISOString(),
+            }
+          : o,
+      );
+      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+      setShowBuktiModal(false);
+      setFotoBuktiUri("");
+      setSelectedOrderBukti(null);
+      await loadOrders();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      Alert.alert("Pengiriman Selesai ✅", "Bukti foto penerimaan (" + (namaPenerima || "YBS") + ") disimpan & pesanan selesai.");
+    } catch {
+      Alert.alert("Error", "Gagal menyelesaikan pesanan.");
+    } finally {
+      setSubmittingBukti(false);
+    }
+  }
+
+  // ── 5. Batch Pickup (Ambil Sekaligus) ──────────────────────────────────
+  async function handleAmbilSemuaOrder(unassignedOrders: OrderWithDistance[]) {
+    try {
+      const raw = await AsyncStorage.getItem(ORDERS_KEY);
+      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
+      const myName = user?.name || "Kurir";
+      const targetIds = new Set(unassignedOrders.map((o) => o.id));
+      const updated = all.map((o) =>
+        targetIds.has(o.id)
+          ? {
+              ...o,
+              kurirId: resolvedKurirId || "kurir_1",
+              kurirName: myName,
+              waktuDiambil: new Date().toISOString(),
+            }
+          : o,
+      );
+      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+      await loadOrders();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      Alert.alert("Batch Pickup Berhasil ⚡", `${unassignedOrders.length} order sekaligus telah Anda ambil! Silakan ambil barang di Kasir/Toko.`);
+    } catch {
+      Alert.alert("Error", "Gagal mengambil batch order.");
+    }
+  }
+
+  // ── 6. Kendala Pengantaran (Rumah Kosong / Customer Tidak Ada) ─────────
+  async function handleKendalaKirim() {
+    if (!selectedOrderKendala || !alasanKendala) return;
+    try {
+      const raw = await AsyncStorage.getItem(ORDERS_KEY);
+      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
+      const updated = all.map((o) =>
+        o.id === selectedOrderKendala.id
+          ? {
+              ...o,
+              status: "tertunda" as const,
+              kendalaKirim: alasanKendala,
+              waktuKendala: new Date().toISOString(),
+            }
+          : o,
+      );
+      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+      setShowKendalaModal(false);
+      setSelectedOrderKendala(null);
+      await loadOrders();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+      Alert.alert("Kendala Dicatat ⚠️", `Pesanan atas nama ${selectedOrderKendala.customerName} ditandai Tertunda: ${alasanKendala}`);
+    } catch {
+      Alert.alert("Error", "Gagal menyimpan kendala pengiriman.");
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -441,6 +678,35 @@ export default function KurirGPSScreen({ kurirId, onBack }: KurirGPSScreenProps)
           </View>
         </View>
 
+        {/* ── Banner Audio Alert Order Baru ── */}
+        {showNewOrderAlert && (
+          <View style={{ backgroundColor: "#DC2626", borderRadius: 14, padding: 14, marginBottom: 14, flexDirection: "row", alignItems: "center", gap: 10, elevation: 3 }}>
+            <Text style={{ fontSize: 24 }}>{"🔔"}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: "#fff", fontWeight: "900", fontSize: 13 }}>{"ADA ORDER BARU SIAP DIJEMPUT!"}</Text>
+              <Text style={{ color: "rgba(255,255,255,0.9)", fontSize: 11, marginTop: 2 }}>{"Kasir baru saja menyiapkan barang pesanan. Segera ambil orderan ini."}</Text>
+            </View>
+          </View>
+        )}
+
+        {/* ── Banner Batch Pickup (Ambil Sekaligus) ── */}
+        {orders.filter(o => o.status === "diproses" && (!o.kurirId || !String(o.kurirId).trim())).length >= 2 && (
+          <TouchableOpacity
+            style={{ backgroundColor: "#6366F1", borderRadius: 16, padding: 16, marginBottom: 16, flexDirection: "row", alignItems: "center", justifyContent: "space-between", elevation: 3 }}
+            onPress={() => handleAmbilSemuaOrder(orders.filter(o => o.status === "diproses" && (!o.kurirId || !String(o.kurirId).trim())))}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: "#fff", fontWeight: "900", fontSize: 14 }}>
+                {"⚡ BATCH DELIVERY: Ambil Sekaligus " + orders.filter(o => o.status === "diproses" && (!o.kurirId || !String(o.kurirId).trim())).length + " Order"}
+              </Text>
+              <Text style={{ color: "rgba(255,255,255,0.85)", fontSize: 11, marginTop: 3 }}>
+                {"Ambil semua pesanan yang siap dijemput dalam satu klik"}
+              </Text>
+            </View>
+            <Text style={{ color: "#fff", fontWeight: "900", fontSize: 22, marginLeft: 10 }}>{"→"}</Text>
+          </TouchableOpacity>
+        )}
+
         {loadingOrder ? (
           <View style={KG.loadingBox}>
             <ActivityIndicator color={INDIGO} />
@@ -525,12 +791,46 @@ export default function KurirGPSScreen({ kurirId, onBack }: KurirGPSScreenProps)
                       <Text style={KG.naviBtnTxt}>{"🗺 Navigasi"}</Text>
                     </TouchableOpacity>
                   )}
-                  <TouchableOpacity
-                    style={[KG.statusBtn, { backgroundColor: nextColor }]}
-                    onPress={() => konfirmasiUpdate(order, nextStatus)}
-                  >
-                    <Text style={KG.statusBtnTxt}>{nextLabel}</Text>
-                  </TouchableOpacity>
+
+                  {/* 1. Jika pesanan siap diproses dan belum diambil kurir */}
+                  {order.status === "diproses" && (!order.kurirId || String(order.kurirId).trim() === "") ? (
+                    <TouchableOpacity
+                      style={[KG.statusBtn, { backgroundColor: BLUE }]}
+                      onPress={() => handleAmbilOrder(order)}
+                    >
+                      <Text style={KG.statusBtnTxt}>{"🙋‍♂️ Ambil Orderan"}</Text>
+                    </TouchableOpacity>
+                  ) : order.status === "diproses" ? (
+                    <TouchableOpacity
+                      style={[KG.statusBtn, { backgroundColor: INDIGO }]}
+                      onPress={() => handleMulaiAntar(order)}
+                    >
+                      <Text style={KG.statusBtnTxt}>{"🚚 Barang Dibawa"}</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <>
+                      <TouchableOpacity
+                        style={[KG.statusBtn, { backgroundColor: SUCCESS, flex: 2 }]}
+                        onPress={() => {
+                          setSelectedOrderBukti(order);
+                          setFotoBuktiUri("");
+                          setShowBuktiModal(true);
+                        }}
+                      >
+                        <Text style={KG.statusBtnTxt}>{"📸 Bukti & Selesai"}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={{ backgroundColor: "#FEF2F2", borderRadius: 12, paddingHorizontal: 12, paddingVertical: 12, alignItems: "center", borderWidth: 1, borderColor: "#FECACA" }}
+                        onPress={() => {
+                          setSelectedOrderKendala(order);
+                          setAlasanKendala("Rumah Kosong / Tidak Ada Orang");
+                          setShowKendalaModal(true);
+                        }}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: "800", color: "#DC2626" }}>{"⚠️ Kendala"}</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
                 </View>
               </View>
             );
@@ -548,6 +848,167 @@ export default function KurirGPSScreen({ kurirId, onBack }: KurirGPSScreenProps)
 
         <View style={BOTTOM_SPACER_STYLE} />
       </ScrollView>
+
+      {/* ── Modal Bukti Foto Pengiriman ── */}
+      <Modal
+        visible={showBuktiModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowBuktiModal(false)}
+      >
+        <View style={KG.modalOverlay}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setShowBuktiModal(false)}
+          />
+          <View style={KG.modalCard}>
+            <Text style={KG.modalTitle}>{"📸 Bukti Foto Pengiriman"}</Text>
+            <Text style={KG.modalSub}>
+              {"Harus disertai bukti foto pengiriman barang untuk pesanan atas nama: " +
+                (selectedOrderBukti?.customerName ?? "")}
+            </Text>
+
+            <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155", marginBottom: 6 }}>
+              {"👤 Diterima Oleh (Nama Penerima):"}
+            </Text>
+            <TextInput
+              style={{ backgroundColor: "#F8FAFC", borderRadius: 10, borderWidth: 1, borderColor: "#E2E8F0", paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: "#1E293B", marginBottom: 10 }}
+              value={namaPenerima}
+              onChangeText={setNamaPenerima}
+              placeholder="Contoh: Pak Budi (YBS) / Istri / Satpam"
+              placeholderTextColor="#94A3B8"
+            />
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+              {["YBS (Customer)", "Keluarga", "Satpam / Resepsionis", "Tetangga", "Taruh di Depan"].map((chip) => (
+                <TouchableOpacity
+                  key={chip}
+                  style={{ backgroundColor: namaPenerima === chip ? "#EEF2FF" : "#F1F5F9", borderRadius: 16, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: namaPenerima === chip ? "#C7D2FE" : "#E2E8F0" }}
+                  onPress={() => setNamaPenerima(chip)}
+                >
+                  <Text style={{ fontSize: 11, fontWeight: namaPenerima === chip ? "800" : "600", color: namaPenerima === chip ? "#4338CA" : "#64748B" }}>
+                    {chip}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {fotoBuktiUri ? (
+              <View style={KG.buktiPreviewBox}>
+                <Image
+                  source={{ uri: fotoBuktiUri }}
+                  style={KG.buktiImg}
+                  resizeMode="cover"
+                />
+                <TouchableOpacity
+                  style={KG.gantiFotoBtn}
+                  onPress={() => setFotoBuktiUri("")}
+                >
+                  <Text style={KG.gantiFotoTxt}>{"❌ Hapus & Ulangi Foto"}</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={KG.fotoBtnRow}>
+                <TouchableOpacity
+                  style={KG.kameraBtn}
+                  onPress={() => pickBuktiFoto("kamera")}
+                >
+                  <Text style={KG.fotoBtnIcon}>{"📷"}</Text>
+                  <Text style={KG.fotoBtnLabel}>{"Ambil dari Kamera"}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={KG.galeriBtn}
+                  onPress={() => pickBuktiFoto("galeri")}
+                >
+                  <Text style={KG.fotoBtnIcon}>{"🖼️"}</Text>
+                  <Text style={KG.fotoBtnLabel}>{"Pilih dari Galeri"}</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            <View style={KG.modalActionRow}>
+              <TouchableOpacity
+                style={KG.modalBatalBtn}
+                onPress={() => {
+                  setShowBuktiModal(false);
+                  setFotoBuktiUri("");
+                }}
+              >
+                <Text style={KG.modalBatalTxt}>{"Batal"}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  KG.modalSimpanBtn,
+                  (!fotoBuktiUri || submittingBukti) && { opacity: 0.5 },
+                ]}
+                disabled={!fotoBuktiUri || submittingBukti}
+                onPress={handleSelesaikanDenganBukti}
+              >
+                <Text style={KG.modalSimpanTxt}>
+                  {submittingBukti ? "Menyimpan..." : "✅ Kirim Bukti & Selesai"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Modal Kendala Pengantaran ── */}
+      <Modal
+        visible={showKendalaModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowKendalaModal(false)}
+      >
+        <View style={KG.modalOverlay}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setShowKendalaModal(false)}
+          />
+          <View style={KG.modalCard}>
+            <Text style={[KG.modalTitle, { color: "#DC2626" }]}>{"⚠️ Kendala Pengantaran"}</Text>
+            <Text style={KG.modalSub}>
+              {"Pilih alasan mengapa paket pesanan tidak dapat diserahkan ke customer sekarang:"}
+            </Text>
+
+            <View style={{ gap: 8, marginBottom: 18 }}>
+              {[
+                "Rumah Kosong / Tidak Ada Orang",
+                "Alamat Tidak Ditemukan / Tidak Jelas",
+                "Customer Tidak Dapat Dihubungi (HP Nonaktif)",
+                "Kendala Cuaca / Jalan Ditutup",
+                "Customer Menolak Terima Paket",
+              ].map((alasan) => (
+                <TouchableOpacity
+                  key={alasan}
+                  style={{ backgroundColor: alasanKendala === alasan ? "#FEF2F2" : "#F8FAFC", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: alasanKendala === alasan ? "#FECACA" : "#E2E8F0" }}
+                  onPress={() => setAlasanKendala(alasan)}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: alasanKendala === alasan ? "800" : "600", color: alasanKendala === alasan ? "#DC2626" : "#334155" }}>
+                    {alasan}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <View style={KG.modalActionRow}>
+              <TouchableOpacity
+                style={KG.modalBatalBtn}
+                onPress={() => setShowKendalaModal(false)}
+              >
+                <Text style={KG.modalBatalTxt}>{"Batal"}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[KG.modalSimpanBtn, { backgroundColor: "#DC2626" }]}
+                onPress={handleKendalaKirim}
+              >
+                <Text style={KG.modalSimpanTxt}>{"⚠️ Catat Kendala"}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -643,4 +1104,23 @@ const KG = StyleSheet.create({
   tipsCard:  { backgroundColor: "#EEF2FF", borderRadius: 14, padding: 14, marginTop: 8, borderWidth: 1, borderColor: "#C7D2FE" },
   tipsTitle: { fontSize: 13, fontWeight: "700", color: "#3730A3", marginBottom: 8 },
   tipsTxt:   { fontSize: 12, color: "#4338CA", marginBottom: 4, lineHeight: 18 },
+
+  modalOverlay:   { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", padding: 20 },
+  modalCard:      { backgroundColor: "#fff", borderRadius: 20, padding: 20, elevation: 5 },
+  modalTitle:     { fontSize: 18, fontWeight: "800", color: "#1E293B", textAlign: "center", marginBottom: 6 },
+  modalSub:       { fontSize: 13, color: "#64748B", textAlign: "center", marginBottom: 16, lineHeight: 18 },
+  fotoBtnRow:     { flexDirection: "row", gap: 12, marginBottom: 20 },
+  kameraBtn:      { flex: 1, backgroundColor: "#EEF2FF", borderRadius: 14, padding: 16, alignItems: "center", borderWidth: 1, borderColor: "#C7D2FE" },
+  galeriBtn:      { flex: 1, backgroundColor: "#F0FDF4", borderRadius: 14, padding: 16, alignItems: "center", borderWidth: 1, borderColor: "#BBF7D0" },
+  fotoBtnIcon:    { fontSize: 28, marginBottom: 6 },
+  fotoBtnLabel:   { fontSize: 13, fontWeight: "700", color: "#334155", textAlign: "center" },
+  buktiPreviewBox:{ alignItems: "center", marginBottom: 18 },
+  buktiImg:       { width: "100%", height: 200, borderRadius: 12, marginBottom: 10, backgroundColor: "#F1F5F9" },
+  gantiFotoBtn:   { backgroundColor: "#FEE2E2", paddingHorizontal: 14, paddingVertical: 8, borderRadius: 10 },
+  gantiFotoTxt:   { color: "#DC2626", fontSize: 12, fontWeight: "700" },
+  modalActionRow: { flexDirection: "row", gap: 10 },
+  modalBatalBtn:  { flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: "#F1F5F9", alignItems: "center" },
+  modalBatalTxt:  { fontSize: 14, fontWeight: "700", color: "#64748B" },
+  modalSimpanBtn: { flex: 2, paddingVertical: 14, borderRadius: 12, backgroundColor: SUCCESS, alignItems: "center" },
+  modalSimpanTxt: { fontSize: 14, fontWeight: "800", color: "#fff" },
 });

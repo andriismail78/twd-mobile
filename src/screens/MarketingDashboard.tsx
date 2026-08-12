@@ -498,6 +498,42 @@ export default function MarketingDashboard() {
           <Text style={S.statLbl}>Total Transaksi</Text>
         </View>
       </View>
+
+      {/* ── Tombol Utama: Daftarkan Owner Toko Baru ── */}
+      <TouchableOpacity
+        style={{
+          backgroundColor: "#2563EB",
+          borderRadius: 16,
+          padding: 16,
+          marginBottom: 16,
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          elevation: 3,
+          borderWidth: 1.5,
+          borderColor: "#60A5FA",
+        }}
+        onPress={() => setShowAddOwner(true)}
+        activeOpacity={0.85}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
+          <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "#DBEAFE", justifyContent: "center", alignItems: "center" }}>
+            <Text style={{ fontSize: 24 }}>{"🏪"}</Text>
+          </View>
+          <View>
+            <Text style={{ fontSize: 16, fontWeight: "900", color: "#fff" }}>
+              {"+ Daftarkan Owner Toko Baru"}
+            </Text>
+            <Text style={{ fontSize: 12, color: "#DBEAFE", marginTop: 2 }}>
+              {"Langsung dapat Uji Coba Gratis 3 Hari! Komisi 20%"}
+            </Text>
+          </View>
+        </View>
+        <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: "rgba(255,255,255,0.2)", justifyContent: "center", alignItems: "center" }}>
+          <Text style={{ fontSize: 18, fontWeight: "900", color: "#fff" }}>{"+"}</Text>
+        </View>
+      </TouchableOpacity>
+
       <View style={S.sectionCard}>
         <Text style={S.sectionTitle}>Estimasi Komisi Bulan Ini</Text>
         <View style={S.komisiRow}>
@@ -1088,8 +1124,14 @@ export default function MarketingDashboard() {
 
   return (
     <View style={S.root}>
-      <View style={S.header}>
+      <View style={[S.header, { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }]}>
         <Text style={S.headerTitle}>Marketing Dashboard</Text>
+        <TouchableOpacity
+          style={{ backgroundColor: "#2563EB", paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, flexDirection: "row", alignItems: "center", gap: 4 }}
+          onPress={() => setShowAddOwner(true)}
+        >
+          <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>{"+ Owner Toko"}</Text>
+        </TouchableOpacity>
       </View>
       <ScrollView
         horizontal

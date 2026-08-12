@@ -1,9 +1,10 @@
 // src/config/doku.config.ts
 
-const MODE: "sandbox" | "production" = "sandbox"; // ✅ production
+export type DokuMode = "sandbox" | "production";
+export const MODE: DokuMode = "sandbox"; // ✅ production
 
 export const DOKU_BASE_URL =
-  MODE === "production"
+  (MODE as DokuMode) === "production"
     ? "https://api.doku.com"
     : "https://api-sandbox.doku.com";
 

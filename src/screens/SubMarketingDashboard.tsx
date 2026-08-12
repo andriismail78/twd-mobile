@@ -951,9 +951,17 @@ export default function SubMarketingDashboard(props: SubMarketingDashboardProps)
             <Text style={SM.headerTitle}>{"📣 Sub-Marketing"}</Text>
             <Text style={SM.headerName}>{subMarketingName}</Text>
           </View>
-          <TouchableOpacity style={SM.logoutBtn} onPress={handleLogout}>
-            <Text style={SM.logoutBtnTxt}>{"⏏ Keluar"}</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <TouchableOpacity
+              style={{ backgroundColor: "#10B981", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 16 }}
+              onPress={() => setShowDaftarOwner(true)}
+            >
+              <Text style={{ color: "#fff", fontWeight: "800", fontSize: 11 }}>{"+ Owner"}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={SM.logoutBtn} onPress={handleLogout}>
+              <Text style={SM.logoutBtnTxt}>{"⏏ Keluar"}</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
 
@@ -1001,6 +1009,41 @@ export default function SubMarketingDashboard(props: SubMarketingDashboardProps)
       {/* ── Tab: Ringkasan ── */}
       {activeTab === "ringkasan" && (
         <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />} contentContainerStyle={SM.scrollContent}>
+          {/* ── Tombol Utama: Daftarkan Owner Toko Baru ── */}
+          <TouchableOpacity
+            style={{
+              backgroundColor: "#10B981",
+              borderRadius: 16,
+              padding: 16,
+              marginBottom: 16,
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              elevation: 3,
+              borderWidth: 1.5,
+              borderColor: "#34D399",
+            }}
+            onPress={() => setShowDaftarOwner(true)}
+            activeOpacity={0.85}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
+              <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "#D1FAE5", justifyContent: "center", alignItems: "center" }}>
+                <Text style={{ fontSize: 24 }}>{"🏪"}</Text>
+              </View>
+              <View>
+                <Text style={{ fontSize: 16, fontWeight: "900", color: "#fff" }}>
+                  {"+ Daftarkan Owner Toko Baru"}
+                </Text>
+                <Text style={{ fontSize: 12, color: "#D1FAE5", marginTop: 2 }}>
+                  {"Komisi Langganan 70%! Trial Gratis 3 Hari"}
+                </Text>
+              </View>
+            </View>
+            <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: "rgba(255,255,255,0.2)", justifyContent: "center", alignItems: "center" }}>
+              <Text style={{ fontSize: 18, fontWeight: "900", color: "#fff" }}>{"+"}</Text>
+            </View>
+          </TouchableOpacity>
+
           <View style={SM.statsGrid}>
             <View style={SM.statCard}><Text style={SM.statVal}>{formatRpShort(todayComm)}</Text><Text style={SM.statLbl}>{"Komisi Ongkir Hari Ini"}</Text></View>
             <View style={SM.statCard}><Text style={SM.statVal}>{formatRpShort(monthComm)}</Text><Text style={SM.statLbl}>{"Komisi Ongkir Bulan Ini"}</Text></View>

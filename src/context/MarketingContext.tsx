@@ -2,6 +2,8 @@
 // src/context/MarketingContext.tsx
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { createContext, useContext, useEffect, useState } from "react";
+import { registerToCloud, syncUsersWithCloud } from "../services/CloudSyncService";
+import { subscribeToRealtimeSync } from "../services/SocketService";
 
 
 export type MarketingRole  = "marketing" | "sub_marketing";
@@ -192,7 +194,15 @@ export function MarketingProvider({ children }: { children: React.ReactNode }) {
   const [komisiRecords,      setKomisiRecords]      = useState<KomisiRecord[]>([]);
   const [deliveryRequests,   setDeliveryRequests]   = useState<DeliveryRequest[]>([]);
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    loadData();
+    const unsubscribe = subscribeToRealtimeSync((event) => {
+      if (event === "user:sync") {
+        loadData();
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
   const loadData = async () => {
     try {
@@ -275,6 +285,28 @@ export function MarketingProvider({ children }: { children: React.ReactNode }) {
         });
       }
 
+      // ✅ Akun mitra & kurir dimuat murni dari server cloud / registrasi resmi tanpa seeder demo
+
+      // ✅ Sinkron ke server cloud VPS Biznet Gio agar HP 1 dan HP 2 selalu tersinkron
+      const cloudList = await syncUsersWithCloud([...mktAccounts, ...ownerRegs]);
+      if (cloudList && cloudList.length > 0) {
+        for (const cu of cloudList) {
+          if ((cu.role === "marketing" || cu.role === "sub_marketing") && !mktAccounts.find(x => x.id === cu.id || x.phone === cu.phone)) {
+            mktAccounts.push({
+              id: cu.id, name: cu.name, phone: cu.phone, pin: cu.pin || "123456",
+              role: cu.role, wilayah: "", createdAt: cu.createdAt || new Date().toISOString(),
+            });
+          } else if (cu.role === "owner" && !ownerRegs.find(o => o.id === cu.id || o.phone === cu.phone)) {
+            ownerRegs.push({
+              id: cu.id, name: cu.name, tokoName: cu.tokoName || `Toko ${cu.name}`,
+              phone: cu.phone, paket: "basic", recruitedBy: cu.recruitedBy || "super_admin",
+              recruitedByRole: "marketing", kodeToken: cu.kode || `TWD-${cu.id.slice(-6)}`,
+              createdAt: cu.createdAt || new Date().toISOString(), totalTransaksi: 0,
+            });
+          }
+        }
+      }
+
       setMarketingAccounts(mktAccounts);
       setKurirAccounts(kurirAccs);
       setOwnerRegistrations(ownerRegs);
@@ -297,8 +329,11 @@ export function MarketingProvider({ children }: { children: React.ReactNode }) {
   const ts    = () => new Date().toISOString();
 
   const addMarketing = (data: Omit<MarketingAccount, "id" | "createdAt">) => {
-    const upd = [...marketingAccounts, { ...data, id: genId(), createdAt: ts() }];
+    const id = genId();
+    const newAcc = { ...data, id, createdAt: ts() };
+    const upd = [...marketingAccounts, newAcc];
     setMarketingAccounts(upd); persist({ marketingAccounts: upd });
+    registerToCloud({ ...newAcc, role: data.role }).catch(() => {});
   };
   const updateMarketing = (id: string, data: Partial<MarketingAccount>) => {
     const upd = marketingAccounts.map(m => m.id === id ? { ...m, ...data } : m);
@@ -386,6 +421,14 @@ export function MarketingProvider({ children }: { children: React.ReactNode }) {
     };
     const upd = [...ownerRegistrations, newRec];
     setOwnerRegistrations(upd); persist({ ownerRegistrations: upd });
+    registerToCloud({
+      name: newRec.name,
+      phone: newRec.phone,
+      role: "owner",
+      tokoName: newRec.tokoName,
+      kodeToken: newRec.kodeToken,
+      ownerId: newRec.id,
+    }).catch(() => {});
     return newRec;
   };
   const deleteOwnerRegistration = (id: string) => {

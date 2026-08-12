@@ -102,7 +102,7 @@ export default function CustomerHomeScreen({
       <Appbar.Header style={S.appbar}>
         <Appbar.Content
           title={storeName ?? "Toko"}
-          subtitle={"Halo, " + session.name + " 👋"}
+          subtitle={"Halo, " + session.name + (session.email ? " (" + session.email + ")" : " 👋")}
           titleStyle={S.appbarTitle}
           subtitleStyle={S.appbarSubtitle}
         />
