@@ -8,6 +8,12 @@
     "scheme": "twdmobile",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "updates": {
+      "url": "https://u.expo.dev/40c8abf1-a036-4d67-8ef2-0c665c364e62"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "ios": {},
     "android": {
       "adaptiveIcon": {
