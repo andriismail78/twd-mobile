@@ -1,192 +1,89 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useState,
-} from "react";
-import { MASTER_GLOBAL_PRODUCTS } from "../config/masterGlobalProducts";
+// src/context/GlobalProductContext.tsx
+import React, { createContext, useContext, useEffect, useState } from "react";
+import axiosClient from "../config/axiosClient";
 
-const STORAGE_KEY_STORE_PRODUCTS  = "@twd_products";
-const STORAGE_KEY_GLOBAL_PRODUCTS = "@twd_global_products";
+export const KOMISI_PER_PRODUK = 100;
 
-export const KOMISI_PER_PRODUK = 500;
+export interface GlobalProduct {
+  id: string;
+  name: string;
+  barcode: string;
+  kategori?: string;
+  satuan?: string;
+  ownerId?: string;
+  addedBy?: string; // ID Marketing yang menambahkan
+}
 
-export type Product = {
-  id:        string;
-  name:      string;
-  sellPrice: number;
-  buyPrice:  number;
-  stock:     number;
-  barcode?:  string;
-  kategori:  string;
-};
+interface GlobalProductContextType {
+  globalProducts: GlobalProduct[];
+  getProductsAddedByUser: (userId: string) => GlobalProduct[];
+  getKomisiProduk: (userId: string) => number;
+  updateGlobalProduct: (id: string, data: Partial<GlobalProduct>) => Promise<void>;
+  addGlobalProduct: (data: Omit<GlobalProduct, "id">) => Promise<void>;
+  reloadGlobalProducts: () => Promise<void>;
+}
 
-export type GlobalProduct = {
-  id:           string;
-  name:         string;
-  sellPrice?:   number;
-  buyPrice?:    number;
-  stock?:       number;
-  barcode?:     string;
-  kategori:     string;
-  ownerId?:     string;   // owner toko yang di-assign ke produk ini
-  komisi?:      number;
-  addedBy?:     string;   // ID marketing/sub-marketing yang menambah produk
-  addedByName?: string;
-};
+const GlobalProductContext = createContext<GlobalProductContextType | undefined>(undefined);
 
-type GlobalProductContextType = {
-  products:               Product[];
-  reload:                 () => Promise<void>;
-  globalProducts:         GlobalProduct[];
-  addGlobalProduct:       (p: Omit<GlobalProduct, "id">) => Promise<void>;
-  updateGlobalProduct:    (id: string, updates: Partial<Omit<GlobalProduct, "id">>) => Promise<void>;
-  deleteGlobalProduct:    (id: string) => Promise<void>;
-  getKomisiProduk:        (userId: string) => number;
-  getProductsByUser:      (userId: string) => GlobalProduct[];   // filter by ownerId
-  getProductsAddedByUser: (userId: string) => GlobalProduct[];   // filter by addedBy
-};
-
-const GlobalProductContext = createContext<GlobalProductContextType>({
-  products:               [],
-  reload:                 async () => {},
-  globalProducts:         [],
-  addGlobalProduct:       async () => {},
-  updateGlobalProduct:    async () => {},
-  deleteGlobalProduct:    async () => {},
-  getKomisiProduk:        () => KOMISI_PER_PRODUK,
-  getProductsByUser:      () => [],
-  getProductsAddedByUser: () => [],
-});
-
-export function GlobalProductProvider({ children }: { children: React.ReactNode }) {
-  const [products,       setProducts]       = useState<Product[]>([]);
+export const GlobalProductProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [globalProducts, setGlobalProducts] = useState<GlobalProduct[]>([]);
 
-  // ─── Load store products ──────────────────────────────────────────────────
-  const loadStoreProducts = useCallback(async () => {
+  const reloadGlobalProducts = async () => {
     try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEY_STORE_PRODUCTS);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          setProducts(parsed);
-        } else if (parsed && typeof parsed === "object") {
-          setProducts(Object.values(parsed));
-        }
-      }
-    } catch { /* ignore */ }
-  }, []);
-
-  // ─── Load global products ─────────────────────────────────────────────────
-  const loadGlobalProducts = useCallback(async () => {
-    try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEY_GLOBAL_PRODUCTS);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setGlobalProducts(parsed);
-          return;
-        }
-      }
-      // ✅ Jika belum ada atau kosong, otomatis pasang master seeder 35+ produk ritel UKM!
-      await AsyncStorage.setItem(STORAGE_KEY_GLOBAL_PRODUCTS, JSON.stringify(MASTER_GLOBAL_PRODUCTS));
-      setGlobalProducts(MASTER_GLOBAL_PRODUCTS);
-    } catch { /* ignore */ }
-  }, []);
+      const res = await axiosClient.get(`/products/global`);
+      setGlobalProducts(res.data || []);
+    } catch (error) {
+      console.error("Gagal memuat produk global:", error);
+      setGlobalProducts([]);
+    }
+  };
 
   useEffect(() => {
-    loadStoreProducts();
-    loadGlobalProducts();
-    const interval = setInterval(loadStoreProducts, 5_000);
-    return () => clearInterval(interval);
+    reloadGlobalProducts();
   }, []);
 
-  // ─── CRUD ─────────────────────────────────────────────────────────────────
+  const getProductsAddedByUser = (userId: string) => {
+    return globalProducts.filter((p) => String(p.addedBy) === String(userId));
+  };
 
-  const addGlobalProduct = useCallback(async (p: Omit<GlobalProduct, "id">) => {
-    const newProduct: GlobalProduct = { ...p, id: Date.now().toString() };
-    setGlobalProducts(prev => {
-      const updated = [...prev, newProduct];
-      AsyncStorage.setItem(STORAGE_KEY_GLOBAL_PRODUCTS, JSON.stringify(updated));
-      return updated;
-    });
-  }, []);
+  const getKomisiProduk = (userId: string) => {
+    return getProductsAddedByUser(userId).length * KOMISI_PER_PRODUK;
+  };
 
-  /** Update field tertentu pada GlobalProduct (misal ownerId saat assign owner) */
-  const updateGlobalProduct = useCallback(
-    async (id: string, updates: Partial<Omit<GlobalProduct, "id">>) => {
-      setGlobalProducts(prev => {
-        const updated = prev.map(p =>
-          p.id === id ? { ...p, ...updates } : p,
-        );
-        AsyncStorage.setItem(STORAGE_KEY_GLOBAL_PRODUCTS, JSON.stringify(updated));
-        return updated;
-      });
-    },
-    [],
-  );
+  const updateGlobalProduct = async (id: string, data: Partial<GlobalProduct>) => {
+    // Untuk sementara, assign owner ke produk global hanya update state lokal di HP.
+    // Karena di backend belum ada route PUT /global/:id khusus untuk ini.
+    setGlobalProducts((prev) => prev.map((p) => (p.id === id ? { ...p, ...data } : p)));
+  };
 
-  const deleteGlobalProduct = useCallback(async (id: string) => {
-    setGlobalProducts(prev => {
-      const updated = prev.filter(p => p.id !== id);
-      AsyncStorage.setItem(STORAGE_KEY_GLOBAL_PRODUCTS, JSON.stringify(updated));
-      return updated;
-    });
-  }, []);
-
-  // ─── Query helpers ────────────────────────────────────────────────────────
-
-  /**
-   * Hitung komisi produk untuk seorang marketing/sub-marketing.
-   * Dihitung dari produk yang DIA TAMBAHKAN (addedBy === userId).
-   */
-  const getKomisiProduk = useCallback(
-    (userId: string): number => {
-      const count = globalProducts.filter(p => p.addedBy === userId).length;
-      return count * KOMISI_PER_PRODUK;
-    },
-    [globalProducts],
-  );
-
-  /** Produk yang di-assign ke owner tertentu (ownerId === userId) */
-  const getProductsByUser = useCallback(
-    (userId: string): GlobalProduct[] => {
-      return globalProducts.filter(p => p.ownerId === userId);
-    },
-    [globalProducts],
-  );
-
-  /** Produk yang DITAMBAHKAN oleh marketing/sub-marketing (addedBy === userId) */
-  const getProductsAddedByUser = useCallback(
-    (userId: string): GlobalProduct[] => {
-      return globalProducts.filter(p => p.addedBy === userId);
-    },
-    [globalProducts],
-  );
-
-  // ─── Context value ────────────────────────────────────────────────────────
-  const contextValue: GlobalProductContextType = {
-    products,
-    reload:                 loadStoreProducts,
-    globalProducts,
-    addGlobalProduct,
-    updateGlobalProduct,
-    deleteGlobalProduct,
-    getKomisiProduk,
-    getProductsByUser,
-    getProductsAddedByUser,
+  const addGlobalProduct = async (data: Omit<GlobalProduct, "id">) => {
+    try {
+      const res = await axiosClient.post(`/products/global`, data);
+      setGlobalProducts((prev) => [...prev, res.data]);
+    } catch (error) {
+      console.error("Gagal menambah produk global:", error);
+      throw error;
+    }
   };
 
   return (
-    <GlobalProductContext.Provider value={contextValue}>
+    <GlobalProductContext.Provider 
+      value={{ 
+        globalProducts, 
+        getProductsAddedByUser, 
+        getKomisiProduk, 
+        updateGlobalProduct, 
+        addGlobalProduct,
+        reloadGlobalProducts
+      }}
+    >
       {children}
     </GlobalProductContext.Provider>
   );
-}
+};
 
 export function useGlobalProducts() {
-  return useContext(GlobalProductContext);
+  const ctx = useContext(GlobalProductContext);
+  if (!ctx) throw new Error("useGlobalProducts must be used within GlobalProductProvider");
+  return ctx;
 }

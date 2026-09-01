@@ -3,7 +3,7 @@ const express = require("express");
 const bcrypt  = require("bcryptjs");
 const jwt     = require("jsonwebtoken");
 const { User, Store } = require("../models");
-const { verifyToken, JWT_SECRET } = require("../middleware/auth.middleware");
+const { verifyToken, requireRole, JWT_SECRET } = require("../middleware/auth.middleware");
 
 const router = express.Router();
 
@@ -160,9 +160,9 @@ router.get("/profile", verifyToken, async (req, res) => {
 
 /**
  * GET /api/auth/users
- * Ambil daftar seluruh pengguna di ekosistem (Super Admin / Cloud Sync)
+ * Ambil daftar seluruh pengguna di ekosistem (Hanya Super Admin)
  */
-router.get("/users", async (req, res) => {
+router.get("/users", verifyToken, requireRole('super_admin'), async (req, res) => {
   try {
     const { role } = req.query;
     const whereClause = role && role !== "semua" ? { role } : {};
@@ -179,9 +179,9 @@ router.get("/users", async (req, res) => {
 
 /**
  * PUT /api/auth/users/:id
- * Edit data pengguna (Nama, No HP, PIN, Role, Status) — Super Admin / Cloud Sync
+ * Edit data pengguna (Hanya Super Admin)
  */
-router.put("/users/:id", async (req, res) => {
+router.put("/users/:id", verifyToken, requireRole('super_admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { name, phone, email, role, pin, active, status } = req.body;
@@ -206,19 +206,24 @@ router.put("/users/:id", async (req, res) => {
 
 /**
  * DELETE /api/auth/users/:id
- * Hapus akun pengguna (Super Admin / Cloud Sync)
+ * Hapus akun pengguna (Soft Delete / Nonaktifkan)
  */
-router.delete("/users/:id", async (req, res) => {
+router.delete("/users/:id", verifyToken, requireRole('super_admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const user = await User.findByPk(id);
     if (!user) return res.status(404).json({ status: "error", message: "Akun tidak ditemukan." });
 
-    await user.destroy();
+    // Lakukan Soft Delete: Set active ke false, jangan hapus permanen
+    // agar data transaksi toko tetap aman.
+    user.active = false;
+    await user.save();
+
     req.app.get("io")?.emit("user:sync", { action: "delete", id });
-    res.json({ status: "success", message: "Akun berhasil dihapus." });
+    res.json({ status: "success", message: "Akun berhasil dinonaktifkan (soft delete)." });
   } catch (err) {
-    res.status(500).json({ status: "error", message: err.message });
+    console.error("Delete User Error:", err);
+    res.status(500).json({ status: "error", message: err.message || "Gagal menghapus akun." });
   }
 });
 

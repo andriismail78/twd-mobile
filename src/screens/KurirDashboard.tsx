@@ -1,6 +1,4 @@
-// src/screens/KurirDashboard.tsx
-// v7 — fix logout (pakai logout() dari AuthContext), tambah tab GPS
-
+// src/screens/KurirDashboard.tsx — v8 CLOUD ONLINE INTEGRATION
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
@@ -11,7 +9,6 @@ import {
   Image,
   Linking,
   Modal,
-  Platform,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -21,6 +18,7 @@ import {
   TouchableOpacity,
   View
 } from "react-native";
+import axiosClient from "../config/axiosClient"; // ✨ Membawa Token JWT otomatis
 import { useAuth } from "../context/AuthContext";
 import KurirGPSScreen from "./KurirGPSScreen";
 
@@ -28,11 +26,12 @@ import KurirGPSScreen from "./KurirGPSScreen";
 
 interface OnlineOrder {
   id: string;
-  ownerId: string;
+  ownerid?: string; // Backend mengembalikan huruf kecil
+  ownerId?: string;
   customerName: string;
   customerPhone?: string;
   customerAddress?: string;
-  items: Array<{ productId: string; name: string; price: number; qty: number }>;
+  items: Array<{ productId: string; name: string; price: number; qty: number }> | string;
   subtotal: number;
   total: number;
   jarakKm?: number;
@@ -124,9 +123,8 @@ function getOrderEarning(order: OnlineOrder) {
   return { ...calcOngkir(jarakKm), jarakKm };
 }
 
-// ─── Storage Keys ─────────────────────────────────────────────────────────────
+// ─── Storage Keys (Untuk Rekening & WD lokal sementara) ──────────────────────
 
-const ORDERS_KEY       = "@twd_orders";
 const KURIR_KEY        = "@twd_kurir_accounts";
 const STORE_PFX        = "@twd_store_info_";
 const KURIR_ONLINE_PFX = "@twd_kurir_online_";
@@ -269,10 +267,11 @@ export default function KurirDashboard(props: KurirDashboardProps) {
     setStoreNames(map);
   }, []);
 
-  // ── Load semua data ────────────────────────────────────────────────────
+  // ── Load semua data DARI SERVER ────────────────────────────────────────
   const loadData = useCallback(async () => {
     if (!idValid) { setLoading(false); return; }
     try {
+      // Ambil info kurir lokal (untuk nama di header)
       const rawKurir = await AsyncStorage.getItem(KURIR_KEY);
       const allKurir: KurirAccount[] = rawKurir ? JSON.parse(rawKurir) : [];
       setKurirInfo(allKurir.find((k) => String(k.id).trim() === resolvedKurirId) ?? null);
@@ -280,32 +279,43 @@ export default function KurirDashboard(props: KurirDashboardProps) {
       const rawOnline = await AsyncStorage.getItem(KURIR_ONLINE_PFX + resolvedKurirId);
       setIsOnline(rawOnline === "true");
 
-      const rawOrders = await AsyncStorage.getItem(ORDERS_KEY);
-      const allOrders: OnlineOrder[] = rawOrders ? JSON.parse(rawOrders) : [];
-      const myOrders = allOrders
+      // ✨ FETCH ORDERS DARI SERVER BIZNET
+      const res = await axiosClient.get(`/orders?kurirId=${resolvedKurirId}`);
+      const serverOrders = res.data.data || [];
+      
+      // Normalisasi data dari backend (items biasa string JSON di DB)
+      const parsedOrders: OnlineOrder[] = serverOrders.map((o: any) => ({
+        ...o,
+        ownerId: String(o.ownerid || o.ownerId || ""),
+        items: typeof o.items === 'string' ? JSON.parse(o.items || '[]') : o.items,
+      }));
+
+      // Filter pesanan yang memang ditugaskan ke kurir ini, ATAU status diproses (siap diambil)
+      const myOrders = parsedOrders
         .filter((o) => {
           const matchId = String(o.kurirId ?? "").trim() === resolvedKurirId;
-          const matchName =
-            !!o.kurirName &&
-            !!(kurirInfo?.nama || kurirInfo?.name || (user as any)?.name) &&
-            String(o.kurirName).trim().toLowerCase() ===
-              String(kurirInfo?.nama || kurirInfo?.name || (user as any)?.name).trim().toLowerCase();
           const isAssigned = o.status === "diproses" || o.status === "dikirim";
-          return matchId || matchName || isAssigned;
+          return matchId || isAssigned;
         })
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        
       setOrders(myOrders);
 
-      const uniqueOwnerIds = Array.from(new Set(myOrders.map((o) => o.ownerId).filter(Boolean)));
+      const uniqueOwnerIds = Array.from(new Set(myOrders.map((o) => o.ownerId).filter(Boolean))) as string[];
       await loadStoreNames(uniqueOwnerIds);
 
+      // Rekening & WD masih lokal sementara
       const rawBank = await AsyncStorage.getItem(KURIR_BANK_PFX + resolvedKurirId);
       setBankAccount(rawBank ? JSON.parse(rawBank) : null);
 
       const rawWd = await AsyncStorage.getItem(KURIR_WD_PFX + resolvedKurirId);
       const allWd: WithdrawalRequest[] = rawWd ? JSON.parse(rawWd) : [];
       setWithdrawals(allWd.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
-    } catch (e) { console.error("KurirDashboard loadData:", e); }
+
+    } catch (e) { 
+      console.error("KurirDashboard loadData:", e); 
+      Alert.alert("Error Jaringan", "Gagal memuat data pesanan dari server.");
+    }
     finally { setLoading(false); setRefreshing(false); }
   }, [resolvedKurirId, idValid, loadStoreNames]);
 
@@ -341,7 +351,6 @@ export default function KurirDashboard(props: KurirDashboardProps) {
           text: "Ya, Logout",
           style: "destructive",
           onPress: async () => {
-            // Set offline dulu sebelum logout
             try { await AsyncStorage.setItem(KURIR_ONLINE_PFX + resolvedKurirId, "false"); } catch {}
             logout();
           },
@@ -350,86 +359,20 @@ export default function KurirDashboard(props: KurirDashboardProps) {
     );
   }
 
-  // ── Update status order ────────────────────────────────────────────────
-  async function updateOrderStatus(orderId: string, newStatus: OnlineOrder["status"]) {
-    try {
-      const rawOrders = await AsyncStorage.getItem(ORDERS_KEY);
-      const allOrders: OnlineOrder[] = rawOrders ? JSON.parse(rawOrders) : [];
-      await AsyncStorage.setItem(
-        ORDERS_KEY,
-        JSON.stringify(allOrders.map((o) => o.id === orderId ? { ...o, status: newStatus } : o)),
-      );
-      await loadData();
-      setSelectedOrder((prev) => prev && prev.id === orderId ? { ...prev, status: newStatus } : prev);
-      Alert.alert("Berhasil ✅", STATUS_LABELS[newStatus] ?? newStatus);
-    } catch { Alert.alert("Error", "Gagal memperbarui status."); }
-  }
-
-  function confirmUpdateStatus(order: OnlineOrder, newStatus: OnlineOrder["status"]) {
-    Alert.alert(
-      "Konfirmasi",
-      "Ubah #" + safeSlice(order.id, -6, "ORDER") + " → " + (STATUS_LABELS[newStatus] ?? newStatus) + "?",
-      [{ text: "Batal", style: "cancel" }, { text: "Ya", onPress: () => updateOrderStatus(order.id, newStatus) }],
-    );
-  }
-
-  function openDetail(o: OnlineOrder) { setSelectedOrder(o); setDetailVisible(true); }
-
-  // ── Pemandu Arah Google Maps (Turn-by-Turn Driving Navigation) ─────────
-  function bukaNavigasiDashboard(address?: string) {
-    if (!address || !address.trim()) {
-      Alert.alert("Alamat Kosong", "Pesanan ini tidak memiliki alamat tujuan yang jelas.");
-      return;
-    }
-    const destination = encodeURIComponent(address.trim());
-    const googleMapsDirUrl = `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving`;
-
-    if (Platform.OS === "android") {
-      const androidNavIntent = `google.navigation:q=${destination}&mode=d`;
-      Linking.canOpenURL(androidNavIntent)
-        .then((ok) => {
-          if (ok) return Linking.openURL(androidNavIntent);
-          return Linking.openURL(googleMapsDirUrl);
-        })
-        .catch(() => Linking.openURL(googleMapsDirUrl));
-      return;
-    }
-
-    if (Platform.OS === "ios") {
-      const iosGoogleMaps = `comgooglemaps://?daddr=${destination}&directionsmode=driving`;
-      Linking.canOpenURL(iosGoogleMaps)
-        .then((ok) => {
-          if (ok) return Linking.openURL(iosGoogleMaps);
-          return Linking.openURL(googleMapsDirUrl);
-        })
-        .catch(() => Linking.openURL(googleMapsDirUrl));
-      return;
-    }
-
-    Linking.openURL(googleMapsDirUrl);
-  }
-
   // ── 1. Kurir ambil orderan dari Kasir ─────────────────────────────────
   async function handleAmbilOrder(order: OnlineOrder) {
     try {
-      const raw = await AsyncStorage.getItem(ORDERS_KEY);
-      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
       const myName = kurirInfo?.name || kurirInfo?.nama || (user as any)?.name || "Kurir";
-      const updated = all.map((o) =>
-        o.id === order.id
-          ? {
-              ...o,
-              kurirId: resolvedKurirId || "kurir_1",
-              kurirName: myName,
-              waktuDiambil: new Date().toISOString(),
-            }
-          : o,
-      );
-      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+      // ✨ UPDATE KE SERVER
+      await axiosClient.put(`/orders/${order.id}/status`, {
+        status: "diproses",
+        kurirId: resolvedKurirId,
+        kurirName: myName,
+      });
       await loadData();
       Alert.alert("Berhasil Diambil 🙋‍♂️", "Order pesanan untuk " + order.customerName + " telah Anda ambil!");
-    } catch {
-      Alert.alert("Error", "Gagal mengambil order.");
+    } catch (e) {
+      Alert.alert("Error", "Gagal mengambil order dari server.");
     }
   }
 
@@ -444,22 +387,14 @@ export default function KurirDashboard(props: KurirDashboardProps) {
           text: "Ya, Mulai Antar",
           onPress: async () => {
             try {
-              const raw = await AsyncStorage.getItem(ORDERS_KEY);
-              const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
-              const updated = all.map((o) =>
-                o.id === order.id
-                  ? {
-                      ...o,
-                      status: "dikirim" as const,
-                      waktuDikirim: new Date().toISOString(),
-                    }
-                  : o,
-              );
-              await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+              // ✨ UPDATE KE SERVER
+              await axiosClient.put(`/orders/${order.id}/status`, {
+                status: "dikirim",
+              });
               await loadData();
               Alert.alert("Status Diperbarui 🚚", "Barang ditandai sedang dikirim ke alamat customer.");
             } catch {
-              Alert.alert("Error", "Gagal memperbarui status.");
+              Alert.alert("Error", "Gagal memperbarui status ke server.");
             }
           },
         },
@@ -467,7 +402,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
     );
   }
 
-  // ── 3. Pilih foto bukti pengiriman (Kamera / Galeri) ───────────────────
+  // ── 3. Pilih foto bukti pengiriman ─────────────────────────────────────
   async function pickBuktiFoto(source: "kamera" | "galeri") {
     try {
       if (source === "kamera") {
@@ -512,26 +447,18 @@ export default function KurirDashboard(props: KurirDashboardProps) {
     }
     setSubmittingBukti(true);
     try {
-      const raw = await AsyncStorage.getItem(ORDERS_KEY);
-      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
-      const updated = all.map((o) =>
-        o.id === selectedOrderBukti.id
-          ? {
-              ...o,
-              status: "selesai" as const,
-              fotoBuktiKirim: fotoBuktiUri,
-              waktuSelesai: new Date().toISOString(),
-            }
-          : o,
-      );
-      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
+      // ✨ UPDATE KE SERVER (Foto URI disimpan string lokal sementara, karena butuh endpoint upload file terpisah)
+      await axiosClient.put(`/orders/${selectedOrderBukti.id}/status`, {
+        status: "selesai",
+        fotoBuktiKirim: fotoBuktiUri, // Nantinya ini harus URL cloud (S3/imgur)
+      });
       setShowBuktiModal(false);
       setFotoBuktiUri("");
       setSelectedOrderBukti(null);
       await loadData();
       Alert.alert("Pengiriman Selesai ✅", "Bukti foto pengiriman berhasil disimpan dan pesanan telah selesai.");
-    } catch {
-      Alert.alert("Error", "Gagal menyelesaikan pesanan.");
+    } catch (e) {
+      Alert.alert("Error", "Gagal menyelesaikan pesanan ke server.");
     } finally {
       setSubmittingBukti(false);
     }
@@ -544,7 +471,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
     });
   }
 
-  // ── Simpan rekening bank ───────────────────────────────────────────────
+  // ── Simpan rekening bank (Lokal) ───────────────────────────────────────
   async function handleSaveBank() {
     if (!bankInput.namaBank.trim() || !bankInput.nomorRekening.trim() || !bankInput.namaPemilik.trim()) {
       Alert.alert("Lengkapi Data", "Semua field rekening harus diisi.");
@@ -583,7 +510,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
   const sedangMengantar = useMemo(() => orders.filter((o) => o.status === "dikirim"), [orders]);
   const tokoCount      = useMemo(() => new Set(orders.map((o) => o.ownerId)).size, [orders]);
 
-  // ── Request pencairan ─────────────────────────────────────────────────
+  // ── Request pencairan (Lokal) ─────────────────────────────────────────
   function handleRequestWithdraw() {
     if (!bankAccount) { Alert.alert("Rekening Belum Diatur", "Tambahkan rekening bank dulu."); setShowBankModal(true); return; }
     const jumlah = Number(wdJumlah.replace(/\D/g, ""));
@@ -635,10 +562,6 @@ export default function KurirDashboard(props: KurirDashboardProps) {
     );
   }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // RENDER
-  // ══════════════════════════════════════════════════════════════════════════
-
   return (
     <View style={S.container}>
 
@@ -673,7 +596,6 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         </View>
       </View>
 
-      {/* ── Banner Sedang Mengantar ── */}
       {sedangMengantar.length > 0 && (
         <View style={S.menghantarBanner}>
           <Text style={S.menghantarIcon}>{"🚚"}</Text>
@@ -687,7 +609,6 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         </View>
       )}
 
-      {/* ── Saldo Card ── */}
       <View style={S.saldoCard}>
         <View style={S.saldoMain}>
           <Text style={S.saldoLbl}>{"Saldo Bisa Dicairkan"}</Text>
@@ -716,7 +637,6 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         )}
       </View>
 
-      {/* ── Stats ── */}
       <View style={S.statsRow}>
         <View style={S.statCard}><Text style={S.statNum}>{String(totalDiproses)}</Text><Text style={S.statLabel}>{"Diproses"}</Text></View>
         <View style={S.statCard}><Text style={S.statNum}>{String(totalDikirim)}</Text><Text style={S.statLabel}>{"Dikirim"}</Text></View>
@@ -724,7 +644,6 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         <View style={S.statCard}><Text style={S.statNum}>{String(orders.length)}</Text><Text style={S.statLabel}>{"Total Tugas"}</Text></View>
       </View>
 
-      {/* ── Tabs ── */}
       <View style={S.tabRow}>
         {(["aktif", "riwayat", "pendapatan", "pencairan", "gps"] as const).map((tab) => (
           <TouchableOpacity
@@ -744,14 +663,12 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         ))}
       </View>
 
-      {/* ════ TAB GPS ════════════════════════════════════════════════════ */}
       {activeTab === "gps" && (
         <View style={S.gpsContainer}>
           <KurirGPSScreen kurirId={resolvedKurirId} />
         </View>
       )}
 
-      {/* ════ TAB PENCAIRAN ══════════════════════════════════════════════ */}
       {activeTab === "pencairan" && (
         <ScrollView style={S.pendapatanScroll} contentContainerStyle={S.pendapatanContent} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}>
           <View style={S.wdSaldoCard}>
@@ -814,7 +731,6 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         </ScrollView>
       )}
 
-      {/* ════ TAB PENDAPATAN ═════════════════════════════════════════════ */}
       {activeTab === "pendapatan" && (
         <ScrollView style={S.pendapatanScroll} contentContainerStyle={S.pendapatanContent} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}>
           <View style={S.earningsSummaryCard}>
@@ -868,7 +784,6 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         </ScrollView>
       )}
 
-      {/* ════ TAB AKTIF & RIWAYAT ════════════════════════════════════════ */}
       {(activeTab === "aktif" || activeTab === "riwayat") && (
         <>
           {activeTab === "aktif" && !isOnline && (
@@ -882,19 +797,19 @@ export default function KurirDashboard(props: KurirDashboardProps) {
           ) : (
             <FlatList
               data={filteredOrders}
-              keyExtractor={(item) => item.id}
+              keyExtractor={(item) => String(item.id)}
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
               contentContainerStyle={S.listContent}
               renderItem={({ item }) => {
                 const earn = getOrderEarning(item);
                 return (
-                  <TouchableOpacity style={S.orderCard} onPress={() => openDetail(item)} activeOpacity={0.85}>
+                  <TouchableOpacity style={S.orderCard} onPress={() => { setSelectedOrder(item); setDetailVisible(true); }} activeOpacity={0.85}>
                     <View style={S.tokoStrip}>
                       <Text style={S.tokoStripTxt}>{"🏪 " + getTokoName(item.ownerId, storeNames)}</Text>
                       <Text style={S.earningBadge}>{"+" + formatRp(earn.kurirNet)}</Text>
                     </View>
                     <View style={S.orderCardTop}>
-                      <Text style={S.orderId}>{"#" + safeSlice(item.id, -6, "ORDER")}</Text>
+                      <Text style={S.orderId}>{"#" + safeSlice(String(item.id), -6, "ORDER")}</Text>
                       <View style={[S.statusBadge, getStatusBg(item.status)]}><Text style={S.statusBadgeText}>{STATUS_LABELS[item.status] ?? item.status}</Text></View>
                     </View>
                     <Text style={S.customerName}>{item.customerName}</Text>
@@ -912,10 +827,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
                       {Boolean(item.customerAddress) && (
                         <TouchableOpacity
                           style={{ marginTop: 8, backgroundColor: "#2563EB", borderRadius: 8, paddingVertical: 8, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 6 }}
-                          onPress={(e) => {
-                            e.stopPropagation();
-                            bukaNavigasiDashboard(item.customerAddress);
-                          }}
+                          onPress={(e) => { e.stopPropagation(); Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(item.customerAddress!)}&travelmode=driving`); }}
                         >
                           <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>{"🗺 Buka Pemandu Arah (Google Maps)"}</Text>
                         </TouchableOpacity>
@@ -938,11 +850,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
                     ) : item.status === "dikirim" ? (
                       <TouchableOpacity
                         style={S.actionBtnGreen}
-                        onPress={() => {
-                          setSelectedOrderBukti(item);
-                          setFotoBuktiUri("");
-                          setShowBuktiModal(true);
-                        }}
+                        onPress={() => { setSelectedOrderBukti(item); setFotoBuktiUri(""); setShowBuktiModal(true); }}
                       >
                         <Text style={S.actionBtnText}>{"📸 Upload Bukti & Selesai"}</Text>
                       </TouchableOpacity>
@@ -955,7 +863,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         </>
       )}
 
-      {/* ════ Modal Detail Order ══════════════════════════════════════════ */}
+      {/* Modal Detail Order */}
       <Modal visible={detailVisible} animationType="slide" onRequestClose={() => setDetailVisible(false)}>
         <View style={S.modalContainer}>
           <View style={S.modalHeader}>
@@ -964,6 +872,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
           </View>
           {selectedOrder !== null && (() => {
             const earn = getOrderEarning(selectedOrder);
+            const parsedItems = typeof selectedOrder.items === 'string' ? JSON.parse(selectedOrder.items || '[]') : selectedOrder.items;
             return (
               <ScrollView style={S.modalBody} showsVerticalScrollIndicator={false}>
                 <View style={S.modalTokoEarningRow}>
@@ -972,7 +881,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
                 </View>
                 <View style={[S.detailStatusStrip, getStatusBg(selectedOrder.status)]}><Text style={S.detailStatusStripTxt}>{STATUS_LABELS[selectedOrder.status] ?? selectedOrder.status}</Text></View>
                 <Text style={S.detailSection}>{"INFO PESANAN"}</Text>
-                <Text style={S.detailRow}>{"ID: #" + safeSlice(selectedOrder.id, -6, "ORDER")}</Text>
+                <Text style={S.detailRow}>{"ID: #" + safeSlice(String(selectedOrder.id), -6, "ORDER")}</Text>
                 <Text style={S.detailRow}>{"Tanggal: " + formatDate(selectedOrder.createdAt)}</Text>
                 <Text style={S.detailRow}>{"Pembayaran: " + (selectedOrder.metodeBayar ?? "-").toUpperCase()}</Text>
                 <Text style={S.detailSection}>{"RINCIAN ONGKIR"}</Text>
@@ -1002,14 +911,14 @@ export default function KurirDashboard(props: KurirDashboardProps) {
                   {Boolean(selectedOrder.customerAddress) && (
                     <TouchableOpacity
                       style={{ marginTop: 10, backgroundColor: "#2563EB", borderRadius: 10, paddingVertical: 10, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 6 }}
-                      onPress={() => bukaNavigasiDashboard(selectedOrder.customerAddress)}
+                      onPress={() => Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(selectedOrder.customerAddress!)}&travelmode=driving`)}
                     >
                       <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>{"🗺 Buka Pemandu Arah (Google Maps)"}</Text>
                     </TouchableOpacity>
                   )}
                 </View>
                 <Text style={S.detailSection}>{"ITEM PESANAN"}</Text>
-                {selectedOrder.items.map((it, idx) => <Text key={String(idx)} style={S.detailRow}>{it.qty + "x " + it.name + " — " + formatRp(it.price * it.qty)}</Text>)}
+                {parsedItems.map((it: any, idx: number) => <Text key={idx} style={S.detailRow}>{it.qty + "x " + it.name + " — " + formatRp(it.price * it.qty)}</Text>)}
                 <View style={S.totalRow}><Text style={S.totalLabel}>{"Total Pesanan"}</Text><Text style={S.totalValue}>{formatRp(selectedOrder.total)}</Text></View>
                 {Boolean(selectedOrder.note) && (<><Text style={S.detailSection}>{"CATATAN CUSTOMER"}</Text><View style={S.noteBox}><Text style={S.noteBoxTxt}>{selectedOrder.note}</Text></View></>)}
                 {Boolean(selectedOrder.catatanKasir) && (<><Text style={S.detailSection}>{"CATATAN KASIR"}</Text><View style={S.catatanKasirBox}><Text style={S.catatanKasirBoxTxt}>{selectedOrder.catatanKasir}</Text></View></>)}
@@ -1024,12 +933,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
                 ) : selectedOrder.status === "dikirim" ? (
                   <TouchableOpacity
                     style={S.actionBtnModalGreen}
-                    onPress={() => {
-                      setDetailVisible(false);
-                      setSelectedOrderBukti(selectedOrder);
-                      setFotoBuktiUri("");
-                      setShowBuktiModal(true);
-                    }}
+                    onPress={() => { setDetailVisible(false); setSelectedOrderBukti(selectedOrder); setFotoBuktiUri(""); setShowBuktiModal(true); }}
                   >
                     <Text style={S.actionBtnText}>{"📸 Upload Bukti & Selesai"}</Text>
                   </TouchableOpacity>
@@ -1043,7 +947,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         </View>
       </Modal>
 
-      {/* ════ Modal Rekening Bank ══════════════════════════════════════════ */}
+      {/* Modal Rekening Bank */}
       <Modal visible={showBankModal} transparent animationType="slide" onRequestClose={() => setShowBankModal(false)}>
         <View style={S.modalOverlay}>
           <View style={S.bankModalSheet}>
@@ -1089,7 +993,7 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         </View>
       </Modal>
 
-      {/* ════ Modal Pencairan Dana ════════════════════════════════════════ */}
+      {/* Modal Pencairan Dana */}
       <Modal visible={showWdModal} transparent animationType="slide" onRequestClose={() => setShowWdModal(false)}>
         <View style={S.modalOverlay}>
           <View style={S.wdModalSheet}>
@@ -1139,80 +1043,44 @@ export default function KurirDashboard(props: KurirDashboardProps) {
         </View>
       </Modal>
 
-      {/* ── Modal Bukti Foto Pengiriman ── */}
-      <Modal
-        visible={showBuktiModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowBuktiModal(false)}
-      >
+      {/* Modal Bukti Foto Pengiriman */}
+      <Modal visible={showBuktiModal} transparent animationType="slide" onRequestClose={() => setShowBuktiModal(false)}>
         <View style={S.modalOverlay}>
-          <TouchableOpacity
-            style={StyleSheet.absoluteFill}
-            activeOpacity={1}
-            onPress={() => setShowBuktiModal(false)}
-          />
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setShowBuktiModal(false)} />
           <View style={S.buktiModalSheet}>
             <Text style={S.modalTitle}>{"📸 Bukti Foto Pengiriman"}</Text>
             <Text style={{ fontSize: 13, color: "#64748B", textAlign: "center", marginBottom: 16 }}>
-              {"Harus disertai bukti foto pengiriman barang untuk pesanan atas nama: " +
-                (selectedOrderBukti?.customerName ?? "")}
+              {"Harus disertai bukti foto pengiriman barang untuk pesanan atas nama: " + (selectedOrderBukti?.customerName ?? "")}
             </Text>
-
             {fotoBuktiUri ? (
               <View style={S.buktiPreviewBox}>
-                <Image
-                  source={{ uri: fotoBuktiUri }}
-                  style={S.buktiImg}
-                  resizeMode="cover"
-                />
-                <TouchableOpacity
-                  style={S.gantiFotoBtn}
-                  onPress={() => setFotoBuktiUri("")}
-                >
+                <Image source={{ uri: fotoBuktiUri }} style={S.buktiImg} resizeMode="cover" />
+                <TouchableOpacity style={S.gantiFotoBtn} onPress={() => setFotoBuktiUri("")}>
                   <Text style={S.gantiFotoTxt}>{"❌ Hapus & Ulangi Foto"}</Text>
                 </TouchableOpacity>
               </View>
             ) : (
               <View style={S.fotoBtnRow}>
-                <TouchableOpacity
-                  style={S.kameraBtn}
-                  onPress={() => pickBuktiFoto("kamera")}
-                >
+                <TouchableOpacity style={S.kameraBtn} onPress={() => pickBuktiFoto("kamera")}>
                   <Text style={S.fotoBtnIcon}>{"📷"}</Text>
                   <Text style={S.fotoBtnLabel}>{"Ambil dari Kamera"}</Text>
                 </TouchableOpacity>
-                <TouchableOpacity
-                  style={S.galeriBtn}
-                  onPress={() => pickBuktiFoto("galeri")}
-                >
+                <TouchableOpacity style={S.galeriBtn} onPress={() => pickBuktiFoto("galeri")}>
                   <Text style={S.fotoBtnIcon}>{"🖼️"}</Text>
                   <Text style={S.fotoBtnLabel}>{"Pilih dari Galeri"}</Text>
                 </TouchableOpacity>
               </View>
             )}
-
             <View style={S.modalActionRow}>
-              <TouchableOpacity
-                style={S.modalBatalBtn}
-                onPress={() => {
-                  setShowBuktiModal(false);
-                  setFotoBuktiUri("");
-                }}
-              >
+              <TouchableOpacity style={S.modalBatalBtn} onPress={() => { setShowBuktiModal(false); setFotoBuktiUri(""); }}>
                 <Text style={S.modalBatalTxt}>{"Batal"}</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[
-                  S.modalSimpanBtn,
-                  (!fotoBuktiUri || submittingBukti) && { opacity: 0.5 },
-                ]}
+                style={[S.modalSimpanBtn, (!fotoBuktiUri || submittingBukti) && { opacity: 0.5 }]}
                 disabled={!fotoBuktiUri || submittingBukti}
                 onPress={handleSelesaikanDenganBukti}
               >
-                <Text style={S.modalSimpanTxt}>
-                  {submittingBukti ? "Menyimpan..." : "✅ Kirim Bukti & Selesai"}
-                </Text>
+                <Text style={S.modalSimpanTxt}>{submittingBukti ? "Menyimpan..." : "✅ Kirim Bukti & Selesai"}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1287,7 +1155,6 @@ const S = StyleSheet.create({
   tabBadge:       { backgroundColor: "#ef4444", borderRadius: 8, minWidth: 16, height: 16, justifyContent: "center", alignItems: "center", paddingHorizontal: 3 },
   tabBadgeTxt:    { color: "#fff", fontSize: 9, fontWeight: "800" },
 
-  // Tab GPS
   gpsContainer: { flex: 1 },
 
   offlineBanner:      { backgroundColor: "#fef2f2", borderRadius: 10, marginHorizontal: 12, marginBottom: 6, padding: 10, flexDirection: "row", alignItems: "center", gap: 8 },

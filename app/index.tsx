@@ -1,15 +1,14 @@
 // app/index.tsx
 import React, { useState } from "react";
 import {
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
-import Constants from "expo-constants";
 
-import { useAuth } from "../src/context/AuthContext";
 import TwdLogoBadge from "../src/components/TwdLogoBadge";
+import { useAuth } from "../src/context/AuthContext";
 
 import CustomerApp from "../src/screens/customer/CustomerApp";
 import KasirScreen from "../src/screens/KasirScreen";
@@ -29,6 +28,9 @@ function AppRouter() {
   const { user } = useAuth();
 
   if (user) {
+    // TAMBAHKAN INI UNTUK MELIHAT ROLE YANG SEBENARNYA
+    console.log("DEBUG ROUTER -> Role saat ini:", user.role);
+    
     switch (user.role) {
       case "super_admin":
         return <SuperAdminDashboard />;
@@ -60,7 +62,7 @@ function AppRouter() {
 
 function RoleSelector() {
   const [pilihan, setPilihan] = useState<PilihanRole>(null);
-  const appTarget = (Constants.expoConfig?.extra?.appTarget || "super").toLowerCase();
+  const appTarget = (process.env.EXPO_PUBLIC_APP_TARGET || "super").toLowerCase();
 
   // Jika di-build khusus untuk Customer APK, langsung tampilkan toko online customer
   if (appTarget === "customer" || pilihan === "customer") {

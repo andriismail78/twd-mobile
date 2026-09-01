@@ -3,7 +3,7 @@
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Device from "expo-device";
-import * as Notifications from "expo-notifications";
+// import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────

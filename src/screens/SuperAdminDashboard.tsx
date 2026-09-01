@@ -1,6 +1,5 @@
-// src/screens/SuperAdminDashboard.tsx — v3 (+ fitur registrasi mitra)
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+// src/screens/SuperAdminDashboard.tsx — v6 FULL COMPLETE (NO COMPACT)
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -14,10 +13,9 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import axiosClient from "../config/axiosClient"; // ✨ Membawa Token JWT otomatis
 import { useAuth } from "../context/AuthContext";
 import { useMarketing } from "../context/MarketingContext";
-import { syncUsersWithCloud, deleteFromCloud, registerToCloud } from "../services/CloudSyncService";
-import { subscribeToRealtimeSync } from "../services/SocketService";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type WdRole = "owner" | "kurir" | "marketing" | "sub_marketing";
@@ -47,8 +45,10 @@ interface UserEntry {
   name: string;
   role: WdRole;
   phone?: string;
+  wilayah?: string; // ✨ Ditambahkan untuk Tab Lokasi
   paket?: string;
   recruitedBy?: string;
+  pin?: string;
 }
 interface OwnerRegistration {
   id: string;
@@ -62,15 +62,6 @@ interface OwnerRegistration {
   createdAt: string;
   kode?: string;
   expiryDate?: string;
-}
-interface KurirAccount {
-  id: string;
-  name?: string;
-  phone?: string;
-  ownerId?: string;
-  marketingRef?: string;
-  subMarketingRef?: string;
-  verified?: boolean;
 }
 
 // ─── Konstanta ────────────────────────────────────────────────────────────────
@@ -148,9 +139,6 @@ function safeSlice(str?: string, len = -6, fallback = "USER"): string {
   if (!str || typeof str !== "string") return fallback;
   return str.slice(len).toUpperCase();
 }
-function genId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-}
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 interface SuperAdminScreenProps {
@@ -170,14 +158,13 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
 
   const [loading,       setLoading]       = useState(true);
   const [refreshing,    setRefreshing]    = useState(false);
-  const [activeTab,     setActiveTab]     = useState<"dashboard" | "owner" | "kasir" | "pencairan" | "users" | "daftar">("dashboard");
+  const [activeTab,     setActiveTab]     = useState<"dashboard" | "owner" | "kasir" | "pencairan" | "users" | "daftar" | "lokasi">("dashboard");
   const [allWd,         setAllWd]         = useState<WdItem[]>([]);
   const [allUsers,      setAllUsers]      = useState<UserEntry[]>([]);
   const [ownersList,    setOwnersList]    = useState<OwnerRegistration[]>([]);
   const [kasirList,     setKasirList]     = useState<any[]>([]);
   const [totalOmzet,    setTotalOmzet]    = useState(0);
   const [totalOrders,   setTotalOrders]   = useState(0);
-  const [searchQuery,   setSearchQuery]   = useState("");
 
   const [detailOwner,   setDetailOwner]   = useState<OwnerRegistration | null>(null);
   const [showOwnerMod,  setShowOwnerMod]  = useState(false);
@@ -188,226 +175,156 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
   const [actionCatatan, setActionCatatan] = useState("");
   const [processing,    setProcessing]    = useState(false);
 
-  // ── State Edit Mitra / User ────────────────────────────────────────────
   const [selectedUserEdit, setSelectedUserEdit] = useState<UserEntry | null>(null);
   const [showEditModal,    setShowEditModal]    = useState(false);
   const [editName,         setEditName]         = useState("");
   const [editPhone,        setEditPhone]        = useState("");
   const [editPin,          setEditPin]          = useState("");
   const [editPaket,        setEditPaket]        = useState<"basic" | "pro" | "enterprise">("basic");
+  const [isSavingEdit,     setIsSavingEdit]     = useState(false);
 
-  // ── State Registrasi Mitra ─────────────────────────────────────────────
   const [regRole,    setRegRole]    = useState<RegRole>("marketing");
   const [regName,    setRegName]    = useState("");
   const [regPhone,   setRegPhone]   = useState("");
   const [regPin,     setRegPin]     = useState("");
   const [regLoading, setRegLoading] = useState(false);
 
-  // ── Load data ────────────────────────────────────────────────────────────
+  const loadingRef = useRef(false);
+
+  // ── Load data DARI SERVER ────────────────────────────────────────────────
   const loadAllData = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+
     try {
-      const allKeys = await AsyncStorage.getAllKeys();
-      const wdItems: WdItem[] = [];
-
-      // Owner WD
-      const ownerWdKeys = allKeys.filter((k) => k.startsWith("@twd_owner_wd_"));
-      for (const key of ownerWdKeys) {
-        const ownerId = key.replace("@twd_owner_wd_", "");
-        const raw = await AsyncStorage.getItem(key);
-        if (!raw) continue;
-        const list: WithdrawalRequest[] = JSON.parse(raw);
-        const infoRaw = await AsyncStorage.getItem("@twd_store_info_" + ownerId);
-        let userName = "Owner " + ownerId.slice(-4);
-        if (infoRaw) {
-          try {
-            const info = JSON.parse(infoRaw);
-            userName = info.namaToko ?? info.tokoName ?? userName;
-          } catch {}
-        }
-        for (const wd of list) {
-          wdItems.push({ ...wd, role: "owner", ownerKey: key, userName });
-        }
-      }
-
-      // Kurir WD
-      const kurirWdKeys = allKeys.filter((k) => k.startsWith("@twd_kurir_wd_"));
-      const kurirRaw    = await AsyncStorage.getItem("@twd_kurir_accounts");
-      const allKurir: KurirAccount[] = kurirRaw ? JSON.parse(kurirRaw) : [];
-      for (const key of kurirWdKeys) {
-        const kurirId = key.replace("@twd_kurir_wd_", "");
-        const raw = await AsyncStorage.getItem(key);
-        if (!raw) continue;
-        const list: WithdrawalRequest[] = JSON.parse(raw);
-        const kurir    = allKurir.find((k) => String(k.id) === kurirId);
-        const userName = kurir?.name ?? "Kurir " + kurirId.slice(-4);
-        for (const wd of list) {
-          wdItems.push({ ...wd, role: "kurir", ownerKey: key, userName });
-        }
-      }
-
-      // Marketing WD
-      const mktWdKeys = allKeys.filter((k) => k.startsWith("@twd_mkt_wd_"));
-      for (const key of mktWdKeys) {
-        const mktId = key.replace("@twd_mkt_wd_", "");
-        const raw = await AsyncStorage.getItem(key);
-        if (!raw) continue;
-        const list: WithdrawalRequest[] = JSON.parse(raw);
-        const bankRaw = await AsyncStorage.getItem("@twd_mkt_bank_" + mktId);
-        let userName  = "Marketing " + mktId.slice(-4);
-        if (bankRaw) {
-          try { userName = JSON.parse(bankRaw).namaPemilik ?? userName; } catch {}
-        }
-        for (const wd of list) {
-          wdItems.push({ ...wd, role: "marketing", ownerKey: key, userName });
-        }
-      }
-
-      // Sub-Marketing WD
-      const smkWdKeys = allKeys.filter((k) => k.startsWith("@twd_smk_wd_"));
-      for (const key of smkWdKeys) {
-        const smkId = key.replace("@twd_smk_wd_", "");
-        const raw = await AsyncStorage.getItem(key);
-        if (!raw) continue;
-        const list: WithdrawalRequest[] = JSON.parse(raw);
-        const bankRaw = await AsyncStorage.getItem("@twd_smk_bank_" + smkId);
-        let userName  = "Sub-Mkt " + smkId.slice(-4);
-        if (bankRaw) {
-          try { userName = JSON.parse(bankRaw).namaPemilik ?? userName; } catch {}
-        }
-        for (const wd of list) {
-          wdItems.push({ ...wd, role: "sub_marketing", ownerKey: key, userName });
-        }
-      }
-
-      wdItems.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setAllWd(wdItems);
-
-      // Load users
+      setLoading(true);
+      const res = await axiosClient.get("/auth/users");
+      const serverUsers = res.data.data || [];
+      
       const users: UserEntry[] = [];
-      const ownerRegRaw = await AsyncStorage.getItem("@twd_owner_registrations");
-      const ownerRegs: OwnerRegistration[] = ownerRegRaw ? JSON.parse(ownerRegRaw) : [];
-      for (const o of ownerRegs) {
-        const name = (o.tokoName ?? "") + (o.name ? " (" + o.name + ")" : "");
-        users.push({ id: o.id, name: name || "Owner", role: "owner", phone: o.phone, paket: o.paket, recruitedBy: o.recruitedBy });
-      }
-      for (const k of allKurir) {
-        users.push({ id: k.id, name: k.name ?? "Kurir " + String(k.id).slice(-4), role: "kurir", phone: k.phone });
-      }
-
-      // ✅ Load marketing & sub_marketing dari @twd_marketing_accounts dan mkt_data_v1
-      const mktRaw = await AsyncStorage.getItem("@twd_marketing_accounts");
-      const mktList: any[] = mktRaw ? JSON.parse(mktRaw) : [];
-      const v1Raw = await AsyncStorage.getItem("mkt_data_v1");
-      const v1: any = v1Raw ? JSON.parse(v1Raw) : {};
-      const v1Mkt: any[] = v1.marketingAccounts || [];
-      const allMkt = [...mktList];
-      for (const vm of v1Mkt) {
-        if (!allMkt.find(x => x.id === vm.id || (x.phone && vm.phone && x.phone === vm.phone))) {
-          allMkt.push(vm);
-        }
-      }
-      for (const m of allMkt) {
-        if (m.role === "marketing" || m.role === "sub_marketing") {
-          users.push({ id: m.id, name: m.name ?? "Marketing", role: m.role, phone: m.phone, pin: m.pin || "123456" });
-        } else if (m.role === "kurir") {
-          if (!users.find((u) => u.id === m.id || (u.phone && m.phone && u.phone === m.phone))) {
-            users.push({ id: m.id, name: m.name ?? "Kurir", role: m.role, phone: m.phone, pin: m.pin || "123456" });
-          }
-        }
-      }
-
-      // Load owners & kasir list
-      setOwnersList(ownerRegs);
-      const kasirRaw = await AsyncStorage.getItem("@twd_kasir_accounts");
-      const kList: any[] = kasirRaw ? JSON.parse(kasirRaw) : [];
-      setKasirList(kList);
-
-      // Load total omzet ekosistem
-      const ordRaw = await AsyncStorage.getItem("@twd_orders");
-      const allOrds: any[] = ordRaw ? JSON.parse(ordRaw) : [];
-      let omzetSum = 0;
-      allOrds.forEach((o) => {
-        if (o && (o.status === "selesai" || o.status === "dikirim" || o.status === "diproses")) {
-          omzetSum += Number(o.total) || 0;
+      const owners: OwnerRegistration[] = [];
+      const kasirs: any[] = [];
+      
+      serverUsers.forEach((u: any) => {
+        if (u.role === "owner") {
+          users.push({
+            id: String(u.id),
+            name: u.name,
+            role: "owner",
+            phone: u.phone,
+            wilayah: u.wilayah || "",
+            paket: u.paket || "basic",
+            recruitedBy: "super_admin"
+          });
+          owners.push({
+            id: String(u.id),
+            name: u.name,
+            tokoName: u.name + "'s Store",
+            phone: u.phone,
+            paket: u.paket || "basic",
+            recruitedBy: "super_admin",
+            recruitedByRole: "marketing",
+            kodeToken: u.kodetoken || "",
+            createdAt: u.createdat || new Date().toISOString(),
+            kode: u.kodetoken || "",
+            expiryDate: u.expirydate
+          });
+        } else if (u.role === "kurir") {
+          users.push({
+            id: String(u.id),
+            name: u.name,
+            role: "kurir",
+            phone: u.phone,
+            wilayah: u.wilayah || ""
+          });
+          kasirs.push({
+            id: String(u.id),
+            name: u.name,
+            phone: u.phone
+          });
+        } else if (u.role === "marketing" || u.role === "sub_marketing") {
+          users.push({
+            id: String(u.id),
+            name: u.name,
+            role: u.role,
+            phone: u.phone,
+            wilayah: u.wilayah || "",
+            pin: u.pin || "123456"
+          });
         }
       });
-      setTotalOmzet(omzetSum);
-      setTotalOrders(allOrds.length);
+      
+      setAllUsers(users);
+      setOwnersList(owners);
+      setKasirList(kasirs);
 
-      const syncedUsers = await syncUsersWithCloud(users);
-      setAllUsers(syncedUsers);
-    } catch (e) {
-      console.error("SuperAdmin loadAllData:", e);
+      // ✨ Ambil data Summary Omzet
+      try {
+        const resSummary = await axiosClient.get("/orders/summary");
+        setTotalOmzet(resSummary.data.data.totalOmset || 0); // Ubah totalOmzet jadi totalOmset
+        setTotalOrders(resSummary.data.data.totalTransaksi || 0); // Ubah totalOrders jadi totalTransaksi
+      } catch (e) {
+        setTotalOmzet(0);
+        setTotalOrders(0);
+      }
+
+      setAllWd([]);
+
+    } catch (error) {
+      console.error("Gagal memuat data dari server:", error);
+      setAllUsers([]); setOwnersList([]); setKasirList([]); setAllWd([]);
+      setTotalOmzet(0); setTotalOrders(0);
     } finally {
       setLoading(false);
       setRefreshing(false);
+      loadingRef.current = false;
     }
   }, []);
 
   useEffect(() => {
     loadAllData();
-    const unsubscribe = subscribeToRealtimeSync((event) => {
-      if (event === "user:sync") {
-        loadAllData();
-      }
-    });
-    return () => unsubscribe();
   }, [loadAllData]);
-  function onRefresh() { setRefreshing(true); loadAllData(); }
+  
+  function onRefresh() { 
+    setRefreshing(true); 
+    loadAllData(); 
+  }
 
   // ── Owner Langganan & Store Management ──────────────────────────────────
   async function handleUpdatePaketOwner(owner: OwnerRegistration, paketBaru: "basic" | "pro" | "enterprise") {
-    try {
-      const raw = await AsyncStorage.getItem("@twd_owner_registrations");
-      const all: OwnerRegistration[] = raw ? JSON.parse(raw) : [];
-      const upd = all.map((o) => (o.id === owner.id ? { ...o, paket: paketBaru } : o));
-      await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(upd));
-      setDetailOwner((prev) => (prev ? { ...prev, paket: paketBaru } : null));
-      await loadAllData();
-      Alert.alert("Berhasil ✅", `Paket toko ${owner.tokoName} diubah ke ${paketBaru.toUpperCase()}`);
-    } catch {
-      Alert.alert("Error", "Gagal merubah paket.");
-    }
+    Alert.alert("Info", "Fitur ubah paket memerlukan endpoint backend terpisah untuk tabel Store. Akan segera diintegrasikan.");
+    setDetailOwner((prev) => (prev ? { ...prev, paket: paketBaru } : null));
   }
 
   async function handlePerpanjangOwner(owner: OwnerRegistration, hari: number) {
-    try {
-      const raw = await AsyncStorage.getItem("@twd_owner_registrations");
-      const all: OwnerRegistration[] = raw ? JSON.parse(raw) : [];
-      const expLama = owner.expiryDate ? new Date(owner.expiryDate) : new Date();
+    Alert.alert("Info", "Fitur perpanjang masa aktif memerlukan endpoint backend terpisah untuk tabel Store.");
+    setDetailOwner((prev) => {
+      if (!prev) return null;
+      const expLama = prev.expiryDate ? new Date(prev.expiryDate) : new Date();
       const now = new Date();
       const baseDate = expLama > now ? expLama : now;
       const baruDate = new Date(baseDate.getTime() + hari * 86400000).toISOString();
-      const upd = all.map((o) => (o.id === owner.id ? { ...o, expiryDate: baruDate } : o));
-      await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(upd));
-      setDetailOwner((prev) => (prev ? { ...prev, expiryDate: baruDate } : null));
-      await loadAllData();
-      Alert.alert("Berhasil ✅", `Masa aktif toko ${owner.tokoName} diperpanjang +${hari} hari.`);
-    } catch {
-      Alert.alert("Error", "Gagal memperpanjang masa aktif.");
-    }
+      return { ...prev, expiryDate: baruDate };
+    });
   }
 
   async function handleHapusOwner(owner: OwnerRegistration) {
     Alert.alert(
       "Hapus Toko / Owner?",
-      `Yakin ingin menghapus toko ${owner.tokoName}? Data tidak dapat dikembalikan.`,
+      `Yakin ingin menghapus akun Owner ${owner.name}? Data toko terkait mungkin masih tersimpan di tabel store.`,
       [
         { text: "Batal", style: "cancel" },
         {
-          text: "Hapus",
+          text: "Hapus Akun",
           style: "destructive",
           onPress: async () => {
             try {
-              const raw = await AsyncStorage.getItem("@twd_owner_registrations");
-              const all: OwnerRegistration[] = raw ? JSON.parse(raw) : [];
-              const upd = all.filter((o) => o.id !== owner.id);
-              await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(upd));
+              await axiosClient.delete(`/auth/users/${owner.id}`);
+              setOwnersList((prev) => prev.filter((o) => o.id !== owner.id));
               setShowOwnerMod(false);
-              await loadAllData();
-              Alert.alert("Toko Dihapus ✅", `Toko ${owner.tokoName} telah dihapus.`);
-            } catch {
-              Alert.alert("Error", "Gagal menghapus toko.");
+              Alert.alert("Berhasil ✅", `Akun Owner ${owner.name} telah dihapus dari server.`);
+            } catch (err: any) {
+              Alert.alert("Error", err.response?.data?.message || "Gagal menghapus akun.");
             }
           },
         },
@@ -416,20 +333,14 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
   }
 
   async function handleToggleKasir(kasir: any) {
-    try {
-      const raw = await AsyncStorage.getItem("@twd_kasir_accounts");
-      const all: any[] = raw ? JSON.parse(raw) : [];
-      const upd = all.map((k) => (k.id === kasir.id ? { ...k, active: k.active === false ? true : false } : k));
-      await AsyncStorage.setItem("@twd_kasir_accounts", JSON.stringify(upd));
-      await loadAllData();
-    } catch {}
+    Alert.alert("Info", "Fitur toggle kasir memerlukan endpoint backend khusus.");
   }
 
   // ── Manajemen Mitra & User (Edit, Reset PIN, Hapus) ───────────────────
-  async function handleHapusUser(user: UserEntry) {
+    async function handleHapusUser(user: UserEntry) {
     Alert.alert(
       "Hapus Akun " + ROLE_LABEL[user.role] + "?",
-      `Yakin ingin menghapus akun '${user.name}'? Data tidak dapat dikembalikan.`,
+      `Yakin ingin menghapus akun '${user.name}' secara permanen dari server?`,
       [
         { text: "Batal", style: "cancel" },
         {
@@ -437,88 +348,13 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
           style: "destructive",
           onPress: async () => {
             try {
-              if (user.role === "marketing" || user.role === "sub_marketing") {
-                deleteMarketing(user.id);
-              } else if (user.role === "kurir") {
-                deleteKurir(user.id);
-              } else if (user.role === "owner") {
-                deleteOwnerRegistration(user.id);
-              }
-
-              const shouldKeep = (item: any) => {
-                const sameId    = Boolean(user.id)    && item.id === user.id;
-                const samePhone = Boolean(user.phone) && item.phone === user.phone;
-                const sameName  = Boolean(user.name)  && item.name === user.name;
-                return !(sameId || samePhone || sameName);
-              };
-
-              // ── 1. Alihkan hak milik Owner ke upline / super_admin saat Marketing/Sub-Marketing dihapus ──
-              if (user.role === "marketing" || user.role === "sub_marketing") {
-                const rawOwner = await AsyncStorage.getItem("@twd_owner_registrations");
-                const ownerList: any[] = rawOwner ? JSON.parse(rawOwner) : [];
-                let hasReassigned = false;
-
-                const rawMkt = await AsyncStorage.getItem("@twd_marketing_accounts");
-                const mktList: any[] = rawMkt ? JSON.parse(rawMkt) : [];
-                const targetMitra = mktList.find((m) => m.id === user.id || (m.phone && user.phone && m.phone === user.phone));
-                const uplineId = targetMitra?.uplineId || "super_admin";
-
-                const updOwners = ownerList.map((o) => {
-                  if (o.recruitedBy === user.id) {
-                    hasReassigned = true;
-                    if (user.role === "sub_marketing") {
-                      return { ...o, recruitedBy: uplineId, recruitedByRole: uplineId === "super_admin" ? "super_admin" : "marketing" };
-                    } else {
-                      return { ...o, recruitedBy: "super_admin", recruitedByRole: "marketing" };
-                    }
-                  }
-                  return o;
-                });
-
-                if (hasReassigned) {
-                  await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(updOwners));
-                }
-
-                if (user.role === "marketing") {
-                  const updSubMkt = mktList.map((m) => (m.uplineId === user.id ? { ...m, uplineId: "super_admin" } : m));
-                  await AsyncStorage.setItem("@twd_marketing_accounts", JSON.stringify(updSubMkt));
-                }
-              }
-
-              // ── 2. Hapus permanen akun pengguna dari semua memori penyimpanan ──
-              const rawMkt = await AsyncStorage.getItem("@twd_marketing_accounts");
-              const mktList: any[] = rawMkt ? JSON.parse(rawMkt) : [];
-              const updMkt = mktList.filter(shouldKeep);
-              await AsyncStorage.setItem("@twd_marketing_accounts", JSON.stringify(updMkt));
-
-              const rawV1 = await AsyncStorage.getItem("mkt_data_v1");
-              const v1: any = rawV1 ? JSON.parse(rawV1) : {};
-              if (v1.marketingAccounts) {
-                v1.marketingAccounts = v1.marketingAccounts.filter(shouldKeep);
-              }
-              if (v1.kurirAccounts) {
-                v1.kurirAccounts = v1.kurirAccounts.filter(shouldKeep);
-              }
-              await AsyncStorage.setItem("mkt_data_v1", JSON.stringify(v1));
-
-              const rawKurir = await AsyncStorage.getItem("@twd_kurir_accounts");
-              const kurirList: any[] = rawKurir ? JSON.parse(rawKurir) : [];
-              const updKurir = kurirList.filter(shouldKeep);
-              await AsyncStorage.setItem("@twd_kurir_accounts", JSON.stringify(updKurir));
-
-              if (user.role === "owner") {
-                const rawOwner = await AsyncStorage.getItem("@twd_owner_registrations");
-                const ownerList: any[] = rawOwner ? JSON.parse(rawOwner) : [];
-                const updOwner = ownerList.filter(shouldKeep);
-                await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(updOwner));
-              }
-
-              await deleteFromCloud(user.id);
-              setAllUsers((prev) => prev.filter(shouldKeep));
-              await loadAllData();
-              Alert.alert("Berhasil Dihapus ✅", `Akun '${user.name}' telah dihapus permanen dari sistem. Hak milik toko yang direkrut telah disesuaikan.`);
-            } catch {
-              Alert.alert("Error", "Gagal menghapus akun.");
+              await axiosClient.delete(`/auth/users/${user.id}`);
+              setAllUsers((prev) => prev.filter((u) => u.id !== user.id));
+              Alert.alert("Berhasil Dihapus ✅", `Akun '${user.name}' telah dihapus dari server.`);
+            } catch (err: any) {
+              console.log("Error Hapus User:", err.response?.data);
+              const errMsg = err.response?.data?.message || err.message || "Gagal menghapus akun dari server.";
+              Alert.alert("Error Server", errMsg);
             }
           },
         },
@@ -528,33 +364,18 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
 
   async function handleResetPinUser(user: UserEntry) {
     Alert.alert(
-      "Reset PIN ke 123456?",
-      `PIN untuk akun '${user.name}' akan diubah menjadi 123456.`,
+      "Reset PIN?",
+      `Reset PIN untuk '${user.name}' menjadi '123456'? Pastikan user menggantinya setelah login.`,
       [
         { text: "Batal", style: "cancel" },
         {
-          text: "Ya, Reset PIN",
+          text: "Reset ke 123456",
           onPress: async () => {
             try {
-              if (user.role === "marketing" || user.role === "sub_marketing" || user.role === "kurir") {
-                const rawMkt = await AsyncStorage.getItem("@twd_marketing_accounts");
-                const mktList: any[] = rawMkt ? JSON.parse(rawMkt) : [];
-                const updMkt = mktList.map((m) => (m.id === user.id ? { ...m, pin: "123456" } : m));
-                await AsyncStorage.setItem("@twd_marketing_accounts", JSON.stringify(updMkt));
-
-                const rawV1 = await AsyncStorage.getItem("mkt_data_v1");
-                const v1: any = rawV1 ? JSON.parse(rawV1) : {};
-                if (user.role === "kurir") {
-                  v1.kurirAccounts = (v1.kurirAccounts ?? []).map((k: any) => (k.id === user.id ? { ...k, pin: "123456" } : k));
-                } else {
-                  v1.marketingAccounts = (v1.marketingAccounts ?? []).map((m: any) => (m.id === user.id ? { ...m, pin: "123456" } : m));
-                }
-                await AsyncStorage.setItem("mkt_data_v1", JSON.stringify(v1));
-              }
-              await loadAllData();
-              Alert.alert("PIN Direset ✅", `PIN akun '${user.name}' sekarang adalah 123456.`);
-            } catch {
-              Alert.alert("Error", "Gagal mereset PIN.");
+              await axiosClient.put(`/auth/users/${user.id}`, { pin: "123456" });
+              Alert.alert("Berhasil ✅", `PIN '${user.name}' telah direset ke 123456.`);
+            } catch (err: any) {
+              Alert.alert("Error", err.response?.data?.message || "Gagal mereset PIN.");
             }
           },
         },
@@ -577,58 +398,36 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
       Alert.alert("Error", "Nama dan No HP wajib diisi.");
       return;
     }
-    try {
-      if (selectedUserEdit.role === "marketing" || selectedUserEdit.role === "sub_marketing" || selectedUserEdit.role === "kurir") {
-        const rawMkt = await AsyncStorage.getItem("@twd_marketing_accounts");
-        const mktList: any[] = rawMkt ? JSON.parse(rawMkt) : [];
-        const updMkt = mktList.map((m) =>
-          m.id === selectedUserEdit.id
-            ? { ...m, name: editName.trim(), phone: editPhone.trim(), pin: editPin.trim() || "123456" }
-            : m,
-        );
-        await AsyncStorage.setItem("@twd_marketing_accounts", JSON.stringify(updMkt));
 
-        const rawV1 = await AsyncStorage.getItem("mkt_data_v1");
-        const v1: any = rawV1 ? JSON.parse(rawV1) : {};
-        if (selectedUserEdit.role === "kurir") {
-          v1.kurirAccounts = (v1.kurirAccounts ?? []).map((k: any) =>
-            k.id === selectedUserEdit.id
-              ? { ...k, name: editName.trim(), phone: editPhone.trim(), pin: editPin.trim() || "123456" }
-              : k,
-          );
-        } else {
-          v1.marketingAccounts = (v1.marketingAccounts ?? []).map((m: any) =>
-            m.id === selectedUserEdit.id
-              ? { ...m, name: editName.trim(), phone: editPhone.trim(), pin: editPin.trim() || "123456" }
-              : m,
-          );
-        }
-        await AsyncStorage.setItem("mkt_data_v1", JSON.stringify(v1));
+    setIsSavingEdit(true);
+    try {
+      const payload: any = {
+        name: editName.trim(),
+        phone: editPhone.trim(),
+      };
+      
+      // Hanya update PIN jika diisi (jangan kosongkan PIN existing jika tidak diisi)
+      if (editPin.trim() && editPin.trim().length >= 4) {
+        payload.pin = editPin.trim();
       }
-      if (selectedUserEdit.role === "owner") {
-        const rawOwner = await AsyncStorage.getItem("@twd_owner_registrations");
-        const ownerList: any[] = rawOwner ? JSON.parse(rawOwner) : [];
-        const updOwner = ownerList.map((o) =>
-          o.id === selectedUserEdit.id
-            ? { ...o, tokoName: editName.trim(), phone: editPhone.trim(), paket: editPaket }
-            : o,
-        );
-        await AsyncStorage.setItem("@twd_owner_registrations", JSON.stringify(updOwner));
-      }
-      try {
-        await registerToCloud({
-          id: selectedUserEdit.id,
-          name: editName.trim(),
-          phone: editPhone.trim(),
-          pin: editPin.trim() || "123456",
-          role: selectedUserEdit.role,
-        });
-      } catch (err) {}
+
+      await axiosClient.put(`/auth/users/${selectedUserEdit.id}`, payload);
+
+      // Update state lokal
+      setAllUsers((prev) =>
+        prev.map((u) =>
+          u.id === selectedUserEdit.id
+            ? { ...u, name: editName.trim(), phone: editPhone.trim(), pin: editPin.trim() || u.pin }
+            : u
+        )
+      );
+
+      Alert.alert("Berhasil ✅", "Data user berhasil diperbarui di server.");
       setShowEditModal(false);
-      await loadAllData();
-      Alert.alert("Tersimpan ✅", "Data akun berhasil diperbarui.");
-    } catch {
-      Alert.alert("Error", "Gagal menyimpan perubahan.");
+    } catch (err: any) {
+      Alert.alert("Error", err.response?.data?.message || "Gagal menyimpan perubahan ke server.");
+    } finally {
+      setIsSavingEdit(false);
     }
   }
 
@@ -640,58 +439,20 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
 
     setRegLoading(true);
     try {
-      const id = genId();
-      const createdAt = new Date().toISOString();
-      const newAccount = {
-        id, name: regName.trim(), phone: regPhone.trim(),
-        pin: regPin.trim(), role: regRole, active: true, createdAt,
-      };
-
-      // ✅ Simpan ke @twd_marketing_accounts
-      const rawMkt = await AsyncStorage.getItem("@twd_marketing_accounts");
-      const mktList: any[] = rawMkt ? JSON.parse(rawMkt) : [];
-      mktList.push(newAccount);
-      await AsyncStorage.setItem("@twd_marketing_accounts", JSON.stringify(mktList));
-
-      // ✅ Juga update mkt_data_v1 agar MarketingContext langsung bisa login
-      const rawV1 = await AsyncStorage.getItem("mkt_data_v1");
-      const v1: any = rawV1 ? JSON.parse(rawV1) : {};
-
-      if (regRole === "kurir") {
-        const kurirAccounts: any[] = v1.kurirAccounts ?? [];
-        kurirAccounts.push({
-          ...newAccount,
-          wilayah: "", status: "available",
-          alamatRumah: "", noKtp: "", fotoKtp: "",
-          fotoSelfie: "", registeredBy: "super_admin", verified: false,
-        });
-        v1.kurirAccounts = kurirAccounts;
-      } else {
-        const marketingAccounts: any[] = v1.marketingAccounts ?? [];
-        marketingAccounts.push(newAccount);
-        v1.marketingAccounts = marketingAccounts;
-      }
-      await AsyncStorage.setItem("mkt_data_v1", JSON.stringify(v1));
-
-      // ✅ Daftarkan langsung ke Server Cloud VPS Biznet Gio agar HP lain bisa login
-      try {
-        await registerToCloud(newAccount);
-      } catch (err) {}
+      await axiosClient.post("/auth/register", {
+        name: regName.trim(),
+        phone: regPhone.trim(),
+        pin: regPin.trim(),
+        role: regRole
+      });
 
       const roleStr = regRole === "marketing" ? "Marketing" : regRole === "sub_marketing" ? "Sub Marketing" : "Kurir";
-      Alert.alert(
-        "✅ Berhasil Didaftarkan",
-        roleStr + " baru berhasil dibuat.\n\n" +
-        "Nama  : " + regName.trim() + "\n" +
-        "No HP : " + regPhone.trim() + "\n" +
-        "PIN   : " + regPin.trim(),
-      );
+      Alert.alert("✅ Berhasil Didaftarkan", roleStr + " baru berhasil dibuat di server.");
 
       setRegName(""); setRegPhone(""); setRegPin(""); setRegRole("marketing");
-      await loadAllData();
-    } catch (e) {
-      console.error("handleRegister:", e);
-      Alert.alert("Error", "Gagal menyimpan data. Coba lagi.");
+      await loadAllData(); 
+    } catch (e: any) {
+      Alert.alert("Error", e.response?.data?.message || "Gagal menyimpan data ke server.");
     } finally {
       setRegLoading(false);
     }
@@ -711,31 +472,15 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
     if (filterStatus !== "semua") list = list.filter((w) => w.status === filterStatus);
     return list;
   }, [allWd, filterRole, filterStatus]);
+  
   const wdByRole = useMemo(() => {
     const map: Record<WdRole, number> = { owner: 0, kurir: 0, marketing: 0, sub_marketing: 0 };
     for (const w of pendingWd) map[w.role] = (map[w.role] ?? 0) + 1;
     return map;
   }, [pendingWd]);
 
-  // ── Update WD status ──────────────────────────────────────────────────────
   async function updateWdStatus(wd: WdItem, newStatus: "diproses" | "selesai" | "ditolak", catatan: string) {
-    setProcessing(true);
-    try {
-      const raw  = await AsyncStorage.getItem(wd.ownerKey);
-      const list: WithdrawalRequest[] = raw ? JSON.parse(raw) : [];
-      const updated = list.map((w) =>
-        w.id === wd.id ? { ...w, status: newStatus, catatan: catatan.trim() || w.catatan } : w,
-      );
-      await AsyncStorage.setItem(wd.ownerKey, JSON.stringify(updated));
-      await loadAllData();
-      setShowWdDetail(false);
-      setActionCatatan("");
-      Alert.alert("Berhasil ✅", "Status diperbarui: " + WD_STATUS_LABEL[newStatus]);
-    } catch {
-      Alert.alert("Error", "Gagal memperbarui status.");
-    } finally {
-      setProcessing(false);
-    }
+    Alert.alert("Info", "Update status WD memerlukan endpoint backend khusus.");
   }
 
   function confirmAction(wd: WdItem, action: "diproses" | "selesai" | "ditolak") {
@@ -744,20 +489,7 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
       selesai:  "Konfirmasi Transfer Selesai",
       ditolak:  "Tolak Pencairan",
     };
-    Alert.alert(
-      labels[action],
-      formatRp(wd.jumlah) + "\na.n. " + wd.namaPemilik +
-      "\n" + wd.namaBank + " · " + wd.nomorRekening +
-      (actionCatatan.trim() ? "\n\nCatatan: " + actionCatatan.trim() : ""),
-      [
-        { text: "Batal", style: "cancel" },
-        {
-          text: labels[action],
-          style: action === "ditolak" ? "destructive" : "default",
-          onPress: () => updateWdStatus(wd, action, actionCatatan),
-        },
-      ],
-    );
+    Alert.alert(labels[action], "Fitur ini belum diintegrasikan penuh dengan backend.");
   }
 
   function handleLogout() {
@@ -771,13 +503,13 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
     return (
       <View style={SA.center}>
         <ActivityIndicator size="large" color={ACCENT} />
-        <Text style={SA.loadingTxt}>{"Memuat data..."}</Text>
+        <Text style={SA.loadingTxt}>{"Memuat data dari server..."}</Text>
       </View>
     );
   }
-    return (
+  
+  return (
     <View style={SA.container}>
-      {/* Header */}
       <View style={SA.header}>
         {onBack && (
           <TouchableOpacity onPress={onBack}>
@@ -793,9 +525,8 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
         </TouchableOpacity>
       </View>
 
-      {/* Tab Bar */}
       <View style={SA.tabBar}>
-        {(["dashboard", "owner", "kasir", "pencairan", "users", "daftar"] as const).map((tab) => (
+        {(["dashboard", "owner", "kasir", "pencairan", "users", "daftar", "lokasi"] as const).map((tab) => (
           <TouchableOpacity
             key={tab}
             style={activeTab === tab ? SA.tabActive : SA.tabInactive}
@@ -806,7 +537,8 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
                tab === "owner"     ? "🏪" :
                tab === "kasir"     ? "💼" :
                tab === "pencairan" ? "💸" :
-               tab === "users"     ? "👥" : "➕"}
+               tab === "users"     ? "👥" : 
+               tab === "daftar"    ? "➕" : "📍"}
             </Text>
             {tab === "pencairan" && pendingWd.length > 0 && (
               <View style={SA.tabBadge}>
@@ -823,7 +555,6 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
           contentContainerStyle={SA.scrollContent}
         >
-          {/* ── Ringkasan Ekosistem TWD ── */}
           <Text style={SA.sectionTitlePlain}>{"📈 Performa & Ekosistem TWD Mobile"}</Text>
           <View style={SA.statsGrid}>
             <View style={[SA.statCard, { backgroundColor: "#EEF2FF", borderColor: "#C7D2FE" }]}>
@@ -852,7 +583,6 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
             </View>
           </View>
 
-          {/* ── Status Pembayaran Mayar.id ── */}
           <View style={{ backgroundColor: "#EEF2FF", borderRadius: 16, padding: 14, marginBottom: 16, borderWidth: 1, borderColor: "#C7D2FE", flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
               <View style={{ backgroundColor: "#DBEAFE", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 }}>
@@ -974,8 +704,7 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
         </ScrollView>
       )}
 
-      {/* ════ TAB: PENCAIRAN ════ */}
-      {/* ════ TAB: OWNER (Manajemen Toko & Langganan) ════ */}
+      {/* ════ TAB: OWNER ════ */}
       {activeTab === "owner" && (
         <ScrollView
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
@@ -984,7 +713,7 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
           <Text style={SA.sectionTitlePlain}>{"🏪 Manajemen Semua Toko & Owner (" + ownersList.length + ")"}</Text>
           {ownersList.length === 0 ? (
             <View style={SA.emptyCard}>
-              <Text style={SA.emptyTxt}>{"Belum ada toko terdaftar."}</Text>
+              <Text style={SA.emptyTxt}>{"Belum ada toko terdaftar di server."}</Text>
             </View>
           ) : (
             ownersList.map((owner) => (
@@ -1020,7 +749,7 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
         </ScrollView>
       )}
 
-      {/* ════ TAB: KASIR (Manajemen Kasir Semua Toko) ════ */}
+      {/* ════ TAB: KASIR ════ */}
       {activeTab === "kasir" && (
         <ScrollView
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
@@ -1029,7 +758,7 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
           <Text style={SA.sectionTitlePlain}>{"💼 Semua Akun Kasir Toko (" + kasirList.length + ")"}</Text>
           {kasirList.length === 0 ? (
             <View style={SA.emptyCard}>
-              <Text style={SA.emptyTxt}>{"Belum ada akun kasir terdaftar."}</Text>
+              <Text style={SA.emptyTxt}>{"Belum ada akun kasir terdaftar di server."}</Text>
             </View>
           ) : (
             kasirList.map((k) => (
@@ -1231,7 +960,6 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
                       </View>
                     </View>
 
-                    {/* Tombol Aksi Super Admin (Edit, Reset PIN, Hapus) */}
                     <View style={{ flexDirection: "row", gap: 8, marginTop: 12, borderTopWidth: 1, borderTopColor: "#F1F5F9", paddingTop: 10 }}>
                       <TouchableOpacity
                         style={{ flex: 1, backgroundColor: "#EFF6FF", paddingVertical: 8, borderRadius: 10, alignItems: "center", borderWidth: 1, borderColor: "#BFDBFE" }}
@@ -1260,7 +988,7 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
           {allUsers.length === 0 && (
             <View style={SA.emptyBox}>
               <Text style={SA.emptyIcon}>{"👥"}</Text>
-              <Text style={SA.emptyTxt}>{"Belum ada user terdaftar."}</Text>
+              <Text style={SA.emptyTxt}>{"Belum ada user terdaftar di server."}</Text>
             </View>
           )}
           <View style={SA.bottomSpacer} />
@@ -1274,7 +1002,6 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
             <Text style={SA.regTitle}>{"➕ Daftarkan Mitra Baru"}</Text>
             <Text style={SA.regSubtitle}>{"Pilih role yang akan didaftarkan:"}</Text>
 
-            {/* Pilih Role */}
             <View style={SA.regRoleRow}>
               {REG_ROLE_OPTIONS.map((r) => (
                 <TouchableOpacity
@@ -1289,7 +1016,6 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
               ))}
             </View>
 
-            {/* Form */}
             <Text style={SA.regFieldLbl}>{"Nama Lengkap *"}</Text>
             <TextInput
               style={SA.regInput}
@@ -1332,7 +1058,6 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
             </TouchableOpacity>
           </View>
 
-          {/* Info */}
           <View style={SA.regInfoCard}>
             <Text style={SA.regInfoTitle}>{"ℹ️ Informasi"}</Text>
             <Text style={SA.regInfoTxt}>{"• Marketing & Sub Marketing dapat login di halaman login mitra."}</Text>
@@ -1340,6 +1065,67 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
             <Text style={SA.regInfoTxt}>{"• Data tersimpan dan langsung bisa digunakan."}</Text>
           </View>
 
+          <View style={SA.bottomSpacer} />
+        </ScrollView>
+      )}
+
+      {/* ════ TAB: LOKASI ════ */}
+      {activeTab === "lokasi" && (
+        <ScrollView
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          contentContainerStyle={SA.scrollContent}
+        >
+          <Text style={SA.sectionTitlePlain}>{"📍 Sebaran Lokasi Owner & Kurir"}</Text>
+          
+          {(() => {
+            // Kelompokkan user berdasarkan wilayah
+            const wilayahMap: Record<string, { owners: number, kurirs: number }> = {};
+            
+            allUsers.forEach((u) => {
+              const w = u.wilayah?.trim() || "Tidak Diketahui";
+              if (!wilayahMap[w]) wilayahMap[w] = { owners: 0, kurirs: 0 };
+              if (u.role === "owner") wilayahMap[w].owners++;
+              if (u.role === "kurir") wilayahMap[w].kurirs++;
+            });
+
+            const wilayahList = Object.keys(wilayahMap);
+
+            if (wilayahList.length === 0 || (wilayahList.length === 1 && wilayahList[0] === "Tidak Diketahui")) {
+              return (
+                <View style={SA.emptyCard}>
+                  <Text style={SA.emptyTxt}>{"Belum ada data lokasi. Pastikan kolom 'wilayah' diisi saat mendaftar akun."}</Text>
+                </View>
+              );
+            }
+
+            return wilayahList.map((w) => {
+              const data = wilayahMap[w];
+              const isKurirOverload = data.kurirs > 3; // Peringatan jika kurir > 3 di wilayah itu
+
+              return (
+                <View key={w} style={[SA.card, { marginBottom: 12, borderLeftWidth: 5, borderLeftColor: isKurirOverload ? DANGER : SUCCESS }]}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <Text style={{ fontSize: 16, fontWeight: "800", color: "#1E293B" }}>{"🗺️ " + w}</Text>
+                    {isKurirOverload && (
+                      <View style={{ backgroundColor: "#FEE2E2", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 }}>
+                        <Text style={{ fontSize: 10, fontWeight: "800", color: DANGER }}>{"⚠️ Kepadatan Tinggi"}</Text>
+                      </View>
+                    )}
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 12 }}>
+                    <View style={{ flex: 1, backgroundColor: "#EFF6FF", padding: 10, borderRadius: 8, alignItems: "center" }}>
+                      <Text style={{ fontSize: 18, fontWeight: "900", color: BLUE }}>{String(data.owners)}</Text>
+                      <Text style={{ fontSize: 11, color: "#475569" }}>{"Owner"}</Text>
+                    </View>
+                    <View style={{ flex: 1, backgroundColor: "#F0FDF4", padding: 10, borderRadius: 8, alignItems: "center" }}>
+                      <Text style={{ fontSize: 18, fontWeight: "900", color: SUCCESS }}>{String(data.kurirs)}</Text>
+                      <Text style={{ fontSize: 11, color: "#475569" }}>{"Kurir"}</Text>
+                    </View>
+                  </View>
+                </View>
+              );
+            });
+          })()}
           <View style={SA.bottomSpacer} />
         </ScrollView>
       )}
@@ -1567,8 +1353,8 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
                       <TextInput
                         style={{ backgroundColor: "#F8FAFC", borderRadius: 10, borderWidth: 1, borderColor: "#E2E8F0", paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: "#1E293B", marginBottom: 14 }}
                         value={editPin}
-                        onChangeText={setEditPin}
-                        placeholder="Contoh: 123456"
+                        onChangeText={(t) => setEditPin(t.replace(/[^0-9]/g, "").slice(0, 8))}
+                        placeholder="Biarkan kosong jika tidak ingin ubah"
                         placeholderTextColor="#94A3B8"
                         keyboardType="number-pad"
                         secureTextEntry={false}
@@ -1609,14 +1395,20 @@ export default function SuperAdminScreen({ onBack }: SuperAdminScreenProps) {
                     <TouchableOpacity
                       style={{ flex: 1, backgroundColor: "#F1F5F9", borderRadius: 12, paddingVertical: 14, alignItems: "center" }}
                       onPress={() => setShowEditModal(false)}
+                      disabled={isSavingEdit}
                     >
                       <Text style={{ fontSize: 14, fontWeight: "700", color: "#64748B" }}>{"Batal"}</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
-                      style={{ flex: 2, backgroundColor: "#10B981", borderRadius: 12, paddingVertical: 14, alignItems: "center", elevation: 2 }}
+                      style={{ flex: 2, backgroundColor: "#10B981", borderRadius: 12, paddingVertical: 14, alignItems: "center", elevation: 2, flexDirection: "row", justifyContent: "center" }}
                       onPress={handleSaveEditUser}
+                      disabled={isSavingEdit}
                     >
-                      <Text style={{ color: "#fff", fontWeight: "800", fontSize: 15 }}>{"💾 Simpan Perubahan"}</Text>
+                      {isSavingEdit ? (
+                        <ActivityIndicator color="#fff" size="small" />
+                      ) : (
+                        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 15 }}>{"💾 Simpan Perubahan"}</Text>
+                      )}
                     </TouchableOpacity>
                   </View>
                 </ScrollView>
@@ -1745,7 +1537,6 @@ const SA = StyleSheet.create({
   emptyBox:  { paddingVertical: 50, alignItems: "center" },
   emptyIcon: { fontSize: 40, marginBottom: 12 },
   emptyTxt:  { fontSize: 14, color: "#94A3B8", textAlign: "center" },
-  // ── Registrasi ────────────────────────────────────────────────────────────
   regCard:        { backgroundColor: "#fff", borderRadius: 16, padding: 20, marginBottom: 12, elevation: 2 },
   regTitle:       { fontSize: 18, fontWeight: "800", color: "#1E293B", marginBottom: 4 },
   regSubtitle:    { fontSize: 13, color: "#64748B", marginBottom: 16 },
@@ -1759,7 +1550,6 @@ const SA = StyleSheet.create({
   regInfoCard:    { backgroundColor: "#EDE9FE", borderRadius: 12, padding: 16, marginBottom: 12 },
   regInfoTitle:   { fontSize: 13, fontWeight: "700", color: "#5B21B6", marginBottom: 8 },
   regInfoTxt:     { fontSize: 12, color: "#6D28D9", marginBottom: 4, lineHeight: 18 },
-  // ── Modal ─────────────────────────────────────────────────────────────────
   overlay:      { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
   detailSheet:  { backgroundColor: "#fff", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, maxHeight: "88%" },
   detailHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },

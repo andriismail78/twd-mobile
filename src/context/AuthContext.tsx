@@ -102,7 +102,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // ── Restore session saat app dibuka ────────────────────────────────────────
+    // ── Restore session saat app dibuka ────────────────────────────────────────
   useEffect(() => {
+    // --- HAPUS SESI LAMA SECARA PAKSA ---
+    AsyncStorage.removeItem("@twd_session").catch(() => {});
+    AsyncStorage.removeItem("twd_token").catch(() => {});
+    // -------------------------------------
+
+    /* // KODE LAMA DI-COMMENT TOTAL AGAR TIDAK BENTROK
     AsyncStorage.getItem("@twd_session").then((raw) => {
       if (!raw) return;
       try {
@@ -113,6 +120,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       } catch {}
     });
+    */
   }, [loadOwnerData]);
 
   // ── login ──────────────────────────────────────────────────────────────────

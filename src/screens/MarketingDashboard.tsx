@@ -1,6 +1,5 @@
 // src/screens/MarketingDashboard.tsx
-// v2 — tambah tab Pencairan Komisi
-
+// v3 — FIXED async registerOwnerWithTrial & safe toUpperCase
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -42,8 +41,6 @@ import DemoScreen from "./DemoScreen";
 import GlobalProductScreen from "./GlobalProductScreen";
 import KurirRegistrationScreen from "./KurirRegistrationScreen";
 import KurirVerifikasiScreen from "./KurirVerifikasiScreen";
-
-// ─── Constants ────────────────────────────────────────────────────────────────
 
 const PRIMARY = "#2563EB";
 const ACCENT  = "#3B82F6";
@@ -115,8 +112,6 @@ const TABS: Array<{ value: Tab; icon: string; label: string }> = [
   { value: "pencairan",  icon: "💸", label: "Pencairan"  },
 ];
 
-// ─── Helper style functions ───────────────────────────────────────────────────
-
 const getBadgeBg  = (color: string) => [S.paketBadge, { backgroundColor: color }];
 const getKurirBg  = (status: string) => {
   const bg =
@@ -134,8 +129,6 @@ const getPaketOpt = (active: boolean, color: string) =>
     : [S.paketOption];
 const getPaketLbl = (active: boolean, color: string) =>
   active ? [S.paketOptionLabel, { color }] : [S.paketOptionLabel];
-
-// ─── Komponen fitur per paket ─────────────────────────────────────────────────
 
 function FeatureValue({ value, paket }: { value: string; paket: PaketMkt }) {
   const isNo  = value === "❌";
@@ -166,8 +159,6 @@ function PaketFeaturesTable({ activePaket }: { activePaket: PaketMkt }) {
     </View>
   );
 }
-
-// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface StoreKurirAccount {
   id:            string;
@@ -200,8 +191,6 @@ interface WithdrawalRequest {
   catatan?:      string;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function formatRpFull(n: number): string {
   return "Rp " + Math.round(n).toLocaleString("id-ID");
 }
@@ -225,8 +214,6 @@ function genWdId(): string {
   return "mwd-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 export default function MarketingDashboard() {
   const { user, logout } = useAuth();
   const {
@@ -248,7 +235,6 @@ export default function MarketingDashboard() {
 
   const [tab, setTab] = useState<Tab>("ringkasan");
 
-  // Modal flags
   const [showAddSubMkt,       setShowAddSubMkt]       = useState(false);
   const [showAddOwner,        setShowAddOwner]         = useState(false);
   const [showAddKurir,        setShowAddKurir]         = useState(false);
@@ -257,16 +243,13 @@ export default function MarketingDashboard() {
   const [showSuccessOwner,    setShowSuccessOwner]     = useState(false);
   const [showFeatures,        setShowFeatures]         = useState(false);
 
-  // Pending kurir count
   const [pendingKurirCount, setPendingKurirCount] = useState(0);
 
-  // Form: Sub-Marketing
   const [smNama,    setSmNama]    = useState("");
   const [smPhone,   setSmPhone]   = useState("");
   const [smPin,     setSmPin]     = useState("");
   const [smWilayah, setSmWilayah] = useState("");
 
-  // Form: Owner
   const [owNama,   setOwNama]   = useState("");
   const [owToko,   setOwToko]   = useState("");
   const [owPhone,  setOwPhone]  = useState("");
@@ -275,11 +258,9 @@ export default function MarketingDashboard() {
   const [owAlamat, setOwAlamat] = useState("");
   const [lastRegistered, setLastRegistered] = useState<OwnerRegistration | null>(null);
 
-  // Assign produk
   const [assignModalVisible, setAssignModalVisible] = useState(false);
   const [selectedProduct,    setSelectedProduct]    = useState<GlobalProduct | null>(null);
 
-  // ── Pencairan state ──
   const [bankAccount,  setBankAccount]  = useState<BankAccount | null>(null);
   const [withdrawals,  setWithdrawals]  = useState<WithdrawalRequest[]>([]);
   const [saldoKomisi,  setSaldoKomisi]  = useState(0);
@@ -291,7 +272,6 @@ export default function MarketingDashboard() {
   const myId   = user?.id   ?? "";
   const myName = user?.name ?? "";
 
-  // Computed
   const myOwners        = useMemo(() => getOwnersByMarketing(myId),   [ownerRegistrations, myId]);
   const mySubMarketings = useMemo(() => getSubMarketing(myId),        [marketingAccounts,  myId]);
   const allMyOwners     = useMemo(() => getAllOwnersByMarketing(myId), [ownerRegistrations, myId]);
@@ -324,7 +304,6 @@ export default function MarketingDashboard() {
   const myProdukCount = myProdukList.length;
   const totalKomisi   = komisiLangganan + komisiDariSubOwner + komisiLayanan + komisiProduk;
 
-  // ── Load pending kurir ──
   const loadPendingKurir = async () => {
     try {
       const raw = await AsyncStorage.getItem(KURIR_STORE_KEY);
@@ -338,7 +317,6 @@ export default function MarketingDashboard() {
     loadPendingKurir();
   };
 
-  // ── Load pencairan ──
   const loadPencairan = useCallback(async () => {
     try {
       const rawWd = await AsyncStorage.getItem(MKT_WD_PFX + myId);
@@ -358,7 +336,6 @@ export default function MarketingDashboard() {
     if (tab === "pencairan") loadPencairan();
   }, [tab, loadPencairan]);
 
-  // ── Simpan rekening ──
   const handleSaveBank = async () => {
     if (!bankInput.namaBank.trim() || !bankInput.nomorRekening.trim() || !bankInput.namaPemilik.trim()) {
       Alert.alert("Lengkapi Data", "Semua field rekening harus diisi."); return;
@@ -371,7 +348,6 @@ export default function MarketingDashboard() {
     } catch { Alert.alert("Error", "Gagal menyimpan rekening."); }
   };
 
-  // ── Ajukan pencairan ──
   const handleRequestWithdraw = async () => {
     if (!bankAccount) {
       Alert.alert("Belum Ada Rekening", "Tambahkan rekening bank terlebih dahulu.");
@@ -417,7 +393,6 @@ export default function MarketingDashboard() {
     );
   };
 
-  // Reset forms
   const resetSmForm = () => {
     setSmNama(""); setSmPhone(""); setSmPin(""); setSmWilayah("");
   };
@@ -439,20 +414,25 @@ export default function MarketingDashboard() {
     Alert.alert("Berhasil", smNama.trim() + " telah didaftarkan sebagai Sub Marketing.");
   };
 
-  const handleSaveOwner = () => {
+  // ─── FIXED: Async registerOwnerWithTrial ───────────────────────────────────
+  const handleSaveOwner = async () => {
     if (!owNama.trim())  { Alert.alert("Error", "Nama pemilik wajib diisi."); return; }
     if (!owToko.trim())  { Alert.alert("Error", "Nama toko wajib diisi.");    return; }
     if (!owPhone.trim()) { Alert.alert("Error", "No. HP wajib diisi.");       return; }
     if (!owBisnis)       { Alert.alert("Error", "Pilih jenis bisnis.");       return; }
-    const result = registerOwnerWithTrial({
+    
+    const result = await registerOwnerWithTrial({
       name: owNama.trim(), tokoName: owToko.trim(), phone: owPhone.trim(),
       paket: owPaket, alamat: owAlamat.trim(), jenisBisnis: owBisnis,
       recruitedBy: myId, recruitedByRole: "marketing",
     });
-    setLastRegistered(result);
-    resetOwnerForm();
-    setShowAddOwner(false);
-    setShowSuccessOwner(true);
+    
+    if (result) {
+      setLastRegistered(result);
+      resetOwnerForm();
+      setShowAddOwner(false);
+      setShowSuccessOwner(true);
+    }
   };
 
   const handleOpenAssign = (product: GlobalProduct) => {
@@ -474,8 +454,6 @@ export default function MarketingDashboard() {
     setAssignModalVisible(false);
     setSelectedProduct(null);
   };
-
-  // ══════════════════════════════════════════════════════════════════════════
 
   const renderRingkasan = () => (
     <ScrollView style={S.tabContent} contentContainerStyle={PB_STYLE}>
@@ -499,7 +477,6 @@ export default function MarketingDashboard() {
         </View>
       </View>
 
-      {/* ── Tombol Utama: Daftarkan Owner Toko Baru ── */}
       <TouchableOpacity
         style={{
           backgroundColor: "#2563EB",
@@ -613,7 +590,7 @@ export default function MarketingDashboard() {
               </View>
               <View style={S.memberBadgeCol}>
                 <View style={getBadgeBg(PAKET_COLOR[o.paket])}>
-                  <Text style={S.paketTxt}>{o.paket.toUpperCase()}</Text>
+                  <Text style={S.paketTxt}>{o.paket?.toUpperCase()}</Text>
                 </View>
                 {daysLeft > 0 && (
                   <View style={S.trialBadge}>
@@ -792,7 +769,7 @@ export default function MarketingDashboard() {
               <Text style={S.memberSub}>{k.phone + "  |  " + k.wilayah}</Text>
             </View>
             <View style={getKurirBg(k.status)}>
-              <Text style={S.paketTxt}>{k.status.toUpperCase()}</Text>
+              <Text style={S.paketTxt}>{k.status?.toUpperCase()}</Text>
             </View>
           </View>
         ))
@@ -863,7 +840,7 @@ export default function MarketingDashboard() {
                     >
                       <View style={FLEX_ONE}>
                         <Text style={S.ownerItemName}>{o.tokoName}</Text>
-                        <Text style={S.ownerItemSub}>{o.name + "  |  " + o.paket.toUpperCase()}</Text>
+                        <Text style={S.ownerItemSub}>{o.name + "  |  " + o.paket?.toUpperCase()}</Text>
                       </View>
                       {isSelected && <Text>{"✅"}</Text>}
                     </TouchableOpacity>
@@ -885,11 +862,8 @@ export default function MarketingDashboard() {
     </View>
   );
 
-  // ── Render tab Pencairan ──
   const renderPencairan = () => (
     <ScrollView style={S.tabContent} contentContainerStyle={PB_STYLE}>
-
-      {/* Saldo card */}
       <View style={S.pcSaldoCard}>
         <Text style={S.pcSaldoLbl}>{"Saldo Komisi Bisa Dicairkan"}</Text>
         <Text style={S.pcSaldoVal}>{formatRpFull(saldoKomisi)}</Text>
@@ -923,7 +897,6 @@ export default function MarketingDashboard() {
         </View>
       </View>
 
-      {/* Ringkasan komisi */}
       <View style={S.pcKomisiBox}>
         <Text style={S.pcKomisiTitle}>{"📊 Rincian Komisi"}</Text>
         <View style={S.pcKomisiRow}>
@@ -948,7 +921,6 @@ export default function MarketingDashboard() {
         </View>
       </View>
 
-      {/* Info */}
       <View style={S.pcInfoBox}>
         <Text style={S.pcInfoTxt}>
           {"• Minimum pencairan: " + formatRpFull(MIN_WD_MKT) +
@@ -958,7 +930,6 @@ export default function MarketingDashboard() {
         </Text>
       </View>
 
-      {/* Rekening tersimpan */}
       {bankAccount && !showBankForm && (
         <View style={S.pcBankCard}>
           <View style={FLEX_ONE}>
@@ -976,7 +947,6 @@ export default function MarketingDashboard() {
         </View>
       )}
 
-      {/* Form Rekening */}
       {showBankForm && (
         <View style={S.pcFormCard}>
           <Text style={S.pcFormTitle}>{"🏦 " + (bankAccount ? "Edit" : "Tambah") + " Rekening Bank"}</Text>
@@ -1021,7 +991,6 @@ export default function MarketingDashboard() {
         </View>
       )}
 
-      {/* Form Pencairan */}
       {showWdForm && (
         <View style={S.pcFormCard}>
           <Text style={S.pcFormTitle}>{"💸 Jumlah Pencairan"}</Text>
@@ -1077,7 +1046,6 @@ export default function MarketingDashboard() {
         </View>
       )}
 
-      {/* Riwayat */}
       <Text style={S.pcHistoryTitle}>{"Riwayat Pencairan"}</Text>
       {withdrawals.length === 0 ? (
         <View style={S.pcHistoryEmpty}>
@@ -1119,8 +1087,6 @@ export default function MarketingDashboard() {
       case "pencairan":  return renderPencairan();
     }
   };
-
-  // ════════════════════════════════════════════════════════════════════════════
 
   return (
     <View style={S.root}>
@@ -1400,7 +1366,7 @@ export default function MarketingDashboard() {
                 <Text style={S.successSub}>{lastRegistered.name}</Text>
                 <View style={[S.paketBadgeSuccess, { backgroundColor: PAKET_COLOR[lastRegistered.paket] }]}>
                   <Text style={S.paketTxt}>
-                    {lastRegistered.paket.toUpperCase() + " — Rp " + (PAKET_HARGA[lastRegistered.paket] / 1000).toFixed(0) + "rb/bln"}
+                    {lastRegistered.paket?.toUpperCase() + " — Rp " + (PAKET_HARGA[lastRegistered.paket] / 1000).toFixed(0) + "rb/bln"}
                   </Text>
                 </View>
                 <View style={S.kodeTokenBox}>
@@ -1468,8 +1434,6 @@ export default function MarketingDashboard() {
     </View>
   );
 }
-
-// ─── StyleSheet ───────────────────────────────────────────────────────────────
 
 const S = StyleSheet.create({
   root:                 { flex: 1, backgroundColor: "#F1F5F9" },
@@ -1622,7 +1586,6 @@ const S = StyleSheet.create({
   trialSuccessTxt:      { color: "#166534", fontSize: 12, fontWeight: "700", textAlign: "center" },
   successCloseBtn:      { marginTop: 16 },
 
-  // ── Pencairan styles ──
   pcSaldoCard:         { backgroundColor: TEAL, borderRadius: 16, margin: 16, marginBottom: 10, padding: 18, alignItems: "center" },
   pcSaldoLbl:          { fontSize: 12, color: "rgba(255,255,255,0.8)", marginBottom: 4 },
   pcSaldoVal:          { fontSize: 28, fontWeight: "800", color: "#fff" },

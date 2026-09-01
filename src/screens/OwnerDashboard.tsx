@@ -1,23 +1,19 @@
 // src/screens/OwnerDashboard.tsx
-// v9 — Tambahan: RekapKeuangan, NotifSettings, badge notifikasi di header
-
+// v11 — Integrasi Mayar.id & AxiosClient Fix
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
+import * as Linking from 'expo-linking';
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Alert,
-  Modal,
-  Linking,
+  Alert, Modal,
   Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
+  ScrollView, StyleSheet, Text,
   TextInput,
-  TouchableOpacity,
-  View,
-} from "react-native";
+  TouchableOpacity, View
+} from 'react-native';
+import { API_BASE_URL } from "../config/api.config";
+import axiosClient from "../config/axiosClient"; // SUDAH DIPERBAIKI
 import { useAuth } from "../context/AuthContext";
-import { createMayarPayment } from "../utils/MayarService";
 import { GlobalProduct } from "../context/GlobalProductContext";
 import {
   PAKET_FEATURES,
@@ -28,26 +24,26 @@ import {
   useMarketing,
 } from "../context/MarketingContext";
 import { useProducts } from "../context/ProductsContext";
+
 import AIOwnerAssistant from "./AIOwnerAssistant";
 import GlobalProductScreen, { ImportDetails } from "./GlobalProductScreen";
 import KasirScreen from "./KasirScreen";
 import KurirRegistrationScreen from "./KurirRegistrationScreen";
 import LaporanScreen from "./LaporanScreen";
 import PengaturanScreen from "./PengaturanScreen";
-import RekapKeuanganScreen from "./RekapKeuanganScreen"; // TAMBAHAN
+import RekapKeuanganScreen from "./RekapKeuanganScreen";
 import ReturOwnerScreen from "./ReturOwnerScreen";
 import StokProdukScreen from "./StokProdukScreen";
 import TimKasirScreen from "./TimKasirScreen";
 
-// TAMBAHAN: Notifikasi
 import NotifSettingsPanel from "../components/NotifSettingsPanel";
 import {
   checkAndNotifyLangganan,
   checkAndNotifyLowStock,
   getUnreadCount,
   markAllRead,
-  scheduleStockCheckNotification,
   scheduleLanggananCheck,
+  scheduleStockCheckNotification,
 } from "../utils/StockNotificationService";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -58,9 +54,6 @@ const DANGER  = "#DC2626";
 const ORANGE  = "#D97706";
 const PURPLE  = "#7C3AED";
 const TEAL    = "#0891B2";
-
-const ORDERS_KEY   = "@twd_orders";
-const PRODUCTS_KEY = "@twd_products";
 
 const OWN_BANK_PFX = "@twd_owner_bank_";
 const OWN_WD_PFX   = "@twd_owner_wd_";
@@ -76,8 +69,8 @@ const WD_STATUS_LABEL: Record<string, string> = {
 const WD_STATUS_COLOR: Record<string, string> = {
   menunggu: "#F59E0B",
   diproses: "#3B82F6",
-  selesai:  "#10B981",
-  ditolak:  "#EF4444",
+  selesai: "#10B981",
+  ditolak: "#EF4444",
 };
 
 const PAKET_COLOR: Record<PaketMkt, string> = {
@@ -107,12 +100,10 @@ const DOWNGRADE_OPTIONS: Record<PaketMkt, PaketMkt[]> = {
 const DOWNGRADE_WARNINGS: Record<PaketMkt, string[]> = {
   basic:      ["Fitur laporan terbatas", "Maksimal 2 kasir"],
   pro:        ["Maksimal 5 kasir"],
-  enterprise: [],   // ← TAMBAHKAN
+  enterprise: [],   
 };
 
 const PAKET_LIST: PaketMkt[] = ["basic", "pro", "enterprise"];
-
-// ─── Feature Gates ────────────────────────────────────────────────────────────
 
 const FEATURE_ACCESS: Record<string, PaketMkt[]> = {
   laporan_mingguan:    ["pro", "enterprise"],
@@ -140,8 +131,6 @@ const MAX_KASIR: Record<PaketMkt, number | null> = {
   pro:        5,
   enterprise: null,
 };
-
-// ─── Reusable style constants ─────────────────────────────────────────────────
 
 const FLEX_ONE = { flex: 1 } as const;
 const PB_STYLE = { paddingBottom: 120 } as const;
@@ -268,7 +257,7 @@ function getPast7Days(): DayOmset[] {
   const days: DayOmset[] = [];
   for (let i = 6; i >= 0; i--) {
     const d = new Date();
-    d.setDate(d.getDate() - i);
+    d.setDate(d.getDate() + i);
     days.push({ label: DAY_NAMES[d.getDay()], date: d.toISOString().slice(0, 10), omset: 0, trx: 0 });
   }
   return days;
@@ -278,15 +267,13 @@ function getPast30Days(): DayOmset[] {
   const days: DayOmset[] = [];
   for (let i = 29; i >= 0; i--) {
     const d = new Date();
-    d.setDate(d.getDate() - i);
+    d.setDate(d.getDate() + i);
     const dd = String(d.getDate()).padStart(2, "0");
     const mm  = String(d.getMonth() + 1).padStart(2, "0");
     days.push({ label: dd + "/" + mm, date: d.toISOString().slice(0, 10), omset: 0, trx: 0 });
   }
   return days;
 }
-
-// ─── Helper style fns ─────────────────────────────────────────────────────────
 
 const getPaketBadgeStyle  = (p: PaketMkt) => [S.paketBadge, { backgroundColor: PAKET_COLOR[p] }];
 const getTrialBarColor    = (d: number) => d > 1 ? SUCCESS : d === 1 ? ORANGE : DANGER;
@@ -295,8 +282,6 @@ const getPaketOptStyle    = (active: boolean, color: string) =>
   active ? [S.paketOpt, { borderColor: color, backgroundColor: color + "18" }] : [S.paketOpt];
 const getPaketOptLblStyle = (active: boolean, color: string) =>
   active ? [S.paketOptLbl, { color }] : [S.paketOptLbl];
-
-// ─── Sub-component: FeatureVal ────────────────────────────────────────────────
 
 function FeatureVal({ value, paket }: { value: string; paket: PaketMkt }) {
   const color =
@@ -338,8 +323,6 @@ function PaketTable({ highlight }: { highlight: PaketMkt }) {
     </View>
   );
 }
-
-// ─── Sub-component: TrialBanner ───────────────────────────────────────────────
 
 function TrialBanner({
   trial, paket, onUpgrade,
@@ -391,8 +374,6 @@ function TrialBanner({
   );
 }
 
-// ─── Sub-component: FeatureLock ───────────────────────────────────────────────
-
 function FeatureLock({
   requiredPaket, currentPaket, onUpgrade,
 }: {
@@ -414,8 +395,6 @@ function FeatureLock({
     </View>
   );
 }
-
-// ─── Sub-component: BarChart ──────────────────────────────────────────────────
 
 const BAR_HEIGHT = 100;
 
@@ -455,8 +434,6 @@ function BarChart({ data, color, compact }: { data: DayOmset[]; color: string; c
   );
 }
 
-// ─── Sub-component: StatistikDetail ──────────────────────────────────────────
-
 function StatistikDetail({
   paket, ownerId, accentColor, onUpgrade,
 }: {
@@ -475,9 +452,9 @@ function StatistikDetail({
   const loadChartData = useCallback(async () => {
     setLoading(true);
     try {
-      const raw   = await AsyncStorage.getItem(ORDERS_KEY);
-      const all: Order[] = raw ? JSON.parse(raw) : [];
-      const mine = all.filter((o) => String(o.ownerId ?? "").trim() === ownerId);
+      // SUDAH DIPERBAIKI: Pakai axiosClient
+      const res = await axiosClient.get(`/orders?ownerId=${ownerId}`);
+      const mine: Order[] = res.data || [];
 
       const days7 = getPast7Days();
       mine.forEach((o) => {
@@ -495,13 +472,26 @@ function StatistikDetail({
       });
       setData30(days30);
 
-      const produkMap: Record<string, TopProduk> = {};
+            const produkMap: Record<string, TopProduk> = {};
       mine.forEach((o) => {
-        o.items.forEach((it) => {
-          if (!produkMap[it.name]) produkMap[it.name] = { name: it.name, qty: 0, omset: 0 };
-          produkMap[it.name].qty   += it.qty;
-          produkMap[it.name].omset += it.price * it.qty;
-        });
+        // PARSING: Jika items berupa string, ubah jadi Array dulu
+        let parsedItems = o.items;
+        if (typeof parsedItems === 'string') {
+          try {
+            parsedItems = JSON.parse(parsedItems);
+          } catch (e) {
+            parsedItems = [];
+          }
+        }
+        
+        // Pastikan parsedItems adalah Array sebelum di-foreach
+        if (Array.isArray(parsedItems)) {
+          parsedItems.forEach((it) => {
+            if (!produkMap[it.name]) produkMap[it.name] = { name: it.name, qty: 0, omset: 0 };
+            produkMap[it.name].qty   += it.qty;
+            produkMap[it.name].omset += it.price * it.qty;
+          });
+        }
       });
       setTopProduk(Object.values(produkMap).sort((a, b) => b.qty - a.qty).slice(0, 5));
     } catch (e) {
@@ -633,7 +623,6 @@ export default function OwnerDashboard() {
   const [selectedUpgrade,   setSelectedUpgrade]   = useState<PaketMkt | null>(null);
   const [selectedDowngrade, setSelectedDowngrade] = useState<PaketMkt | null>(null);
 
-  // TAMBAHAN: state baru
   const [showRekap,        setShowRekap]        = useState(false);
   const [showNotifSettings,setShowNotifSettings] = useState(false);
   const [unreadNotif,      setUnreadNotif]       = useState(0);
@@ -646,7 +635,6 @@ export default function OwnerDashboard() {
   const [lowStockCount,   setLowStockCount]   = useState(0);
   const [emptyStockCount, setEmptyStockCount] = useState(0);
 
-  // pencairan state
   const [showPencairan, setShowPencairan] = useState(false);
   const [bankAccount,   setBankAccount]   = useState<BankAccount | null>(null);
   const [withdrawals,   setWithdrawals]   = useState<WithdrawalRequest[]>([]);
@@ -657,24 +645,31 @@ export default function OwnerDashboard() {
   const [showWdForm,    setShowWdForm]   = useState(false);
   const [showMayarSubModal, setShowMayarSubModal] = useState(false);
 
-  const handleBayarLanggananMayar = async () => {
+    const handleBayarLanggananMayar = async () => {
+    const paket = (myRegistration?.paket as PaketMkt) ?? "basic";
     const harga = PAKET_HARGA[paket] || 50000;
-    const tokoName = myRegistration?.tokoName || "Toko Owner";
+    const ownerName = myRegistration?.name || "Owner TWD";
+    const ownerPhone = myRegistration?.phone || "081200000000";
+    const ownerEmail = user?.email || `${ownerPhone}@twd.local`;
+
     try {
-      const mayarResp = await createMayarPayment({
-        orderId:       `SUB-${Date.now()}`,
-        amount:        harga,
-        customerName:  tokoName,
-        customerEmail: "owner@twdmobile.com",
-        customerPhone: "081200000000",
-        description:   `Langganan TWD ${PAKET_LABEL[paket]} - ${tokoName}`,
+      // Perbaikan URL: axiosClient sudah otomatis menambahkan API_BASE_URL
+      const response = await axiosClient.post(`/mayar/create-invoice`, {
+        ownerId: myId,
+        amount: harga,
+        name: ownerName,
+        email: ownerEmail,
+        phone: ownerPhone,
       });
-      if (mayarResp && mayarResp.linkUrl && !mayarResp.linkUrl.includes("mayar.id/pay/twdmobile")) {
-        return Linking.openURL(mayarResp.linkUrl);
+
+      if (response.data?.status === 'success' && response.data?.data?.paymentUrl) {
+        await Linking.openURL(response.data.data.paymentUrl);
+      } else {
+        Alert.alert("Gagal", "Tidak dapat membuat link pembayaran. Silakan coba lagi.");
       }
-      setShowMayarSubModal(true);
-    } catch {
-      setShowMayarSubModal(true);
+    } catch (error) {
+      console.error("Mayar Invoice Error:", error);
+      Alert.alert("Error", "Terjadi kesalahan saat menghubungi server pembayaran Mayar.");
     }
   };
 
@@ -703,7 +698,6 @@ export default function OwnerDashboard() {
   const canAI              = canAccess("ai_assistant", paket);
   const produkLimitReached = maxProduk !== null && ownerProducts.length >= maxProduk;
 
-  // ── TAMBAHAN: Load unread notif & cek stok/langganan saat buka ──────────────
   const loadNotifData = useCallback(async () => {
     const count = await getUnreadCount();
     setUnreadNotif(count);
@@ -718,17 +712,16 @@ export default function OwnerDashboard() {
         checkAndNotifyLangganan(myRegistration.tokoName, expiry).catch(() => {});
       }
     });
-    // Jadwal harian untuk pengecekan stok dan langganan
-    scheduleStockCheckNotification(8).catch(() => {});   // Pukul 08:00
-    scheduleLanggananCheck(9).catch(() => {});           // Pukul 09:00
+    scheduleStockCheckNotification(8).catch(() => {});   
+    scheduleLanggananCheck(9).catch(() => {});           
   }
 }, [myId, myRegistration, loadNotifData]));
 
-  // ── Load retur ──
   const loadPendingReturs = useCallback(async () => {
     try {
-      const raw = await AsyncStorage.getItem("@twd_retur_" + myId);
-      const all: ReturRequest[] = raw ? JSON.parse(raw) : [];
+      // SUDAH DIPERBAIKI: Pakai axiosClient
+      const res = await axiosClient.get(`/returs?ownerId=${myId}`);
+      const all: ReturRequest[] = res.data || [];
       const pending = all
         .filter((r) => r.status === "menunggu")
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -743,12 +736,11 @@ export default function OwnerDashboard() {
     setShowRetur(true);
   }
 
-  // ── Load produk ──
   const loadOwnerProducts = useCallback(async () => {
     try {
-      const raw   = await AsyncStorage.getItem(PRODUCTS_KEY);
-      const all: StoreProduct[] = raw ? JSON.parse(raw) : [];
-      const mine = all.filter((p) => String(p.ownerId ?? "").trim() === myId);
+      // SUDAH DIPERBAIKI: Pakai axiosClient
+      const res = await axiosClient.get(`/products?ownerId=${myId}`);
+      const mine: StoreProduct[] = res.data || [];
       setOwnerProducts(mine);
       setLowStockCount(mine.filter((p) => p.stock > 0 && p.stock <= (p.stockMin ?? 5)).length);
       setEmptyStockCount(mine.filter((p) => p.stock === 0).length);
@@ -772,9 +764,8 @@ export default function OwnerDashboard() {
     return;
   }
   try {
-    // ✅ Gunakan ProductsContext.addProduct agar in-memory state ter-update
     await ctxAddProduct({
-      ownerId:   myId,          // akan ikut tersimpan via ...data spread
+      ownerId:   myId,          
       name:      product.name,
       barcode:   product.barcode ?? "",
       sellPrice: details.sellPrice,
@@ -797,11 +788,11 @@ export default function OwnerDashboard() {
   }
 };
 
-  // ── Load statistik ──
   const loadStats = useCallback(async () => {
     try {
-      const raw = await AsyncStorage.getItem(ORDERS_KEY);
-      const allOrders: Order[] = raw ? JSON.parse(raw) : [];
+      // SUDAH DIPERBAIKI: Pakai axiosClient
+      const res = await axiosClient.get(`/orders?ownerId=${myId}`);
+      const allOrders: Order[] = res.data || [];
       const todayStr = new Date().toISOString().slice(0, 10);
       const todayOrders = allOrders.filter(
         (o) => o.ownerId === myId && o.createdAt?.slice(0, 10) === todayStr
@@ -816,30 +807,22 @@ export default function OwnerDashboard() {
 
   useEffect(() => { loadStats(); }, [loadStats]);
 
-  // ── Load pencairan ──
   const loadPencairan = useCallback(async () => {
     try {
-      const raw = await AsyncStorage.getItem(ORDERS_KEY);
-      const allOrders: Order[] = raw ? JSON.parse(raw) : [];
-      const onlineSelesai = allOrders.filter(
-        (o) => String(o.ownerId) === myId && o.type === "online" && o.status === "selesai"
-      );
-      const totalMasuk = onlineSelesai.reduce((s, o) => s + (o.subtotal ?? o.total ?? 0), 0);
-
-      const rawWd = await AsyncStorage.getItem(OWN_WD_PFX + myId);
-      const allWd: WithdrawalRequest[] = rawWd ? JSON.parse(rawWd) : [];
+      // SUDAH DIPERBAIKI: Pakai axiosClient
+      const res = await axiosClient.get(`/withdrawals?ownerId=${myId}`);
+      const allWd: WithdrawalRequest[] = res.data || [];
       setWithdrawals(allWd.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
 
       const totalCair    = allWd.filter((w) => w.status === "selesai").reduce((s, w) => s + w.jumlah, 0);
       const totalPending = allWd.filter((w) => w.status === "menunggu" || w.status === "diproses").reduce((s, w) => s + w.jumlah, 0);
-      setSaldoOnline(Math.max(0, totalMasuk - totalCair - totalPending));
+      setSaldoOnline(Math.max(0, 0 - totalCair - totalPending)); // Note: Need API for actual balance
 
       const rawBank = await AsyncStorage.getItem(OWN_BANK_PFX + myId);
       setBankAccount(rawBank ? JSON.parse(rawBank) : null);
     } catch (e) { console.error("loadPencairan error:", e); }
   }, [myId]);
 
-  // ── Simpan rekening ──
   const handleSaveBank = async () => {
     if (!bankInput.namaBank.trim() || !bankInput.nomorRekening.trim() || !bankInput.namaPemilik.trim()) {
       Alert.alert("Lengkapi Data", "Semua field rekening harus diisi."); return;
@@ -852,7 +835,6 @@ export default function OwnerDashboard() {
     } catch { Alert.alert("Error", "Gagal menyimpan rekening."); }
   };
 
-  // ── Ajukan pencairan ──
   const handleRequestWithdraw = async () => {
     if (!bankAccount) {
       Alert.alert("Belum Ada Rekening", "Tambahkan rekening bank terlebih dahulu.");
@@ -876,17 +858,14 @@ export default function OwnerDashboard() {
           text: "Cairkan",
           onPress: async () => {
             try {
-              const wd: WithdrawalRequest = {
-                id: genWdId(), ownerId: myId, jumlah,
+              // SUDAH DIPERBAIKI: Pakai axiosClient
+              await axiosClient.post(`/withdrawals`, {
+                ownerId: myId, jumlah,
                 namaBank: bankAccount.namaBank,
                 nomorRekening: bankAccount.nomorRekening,
                 namaPemilik: bankAccount.namaPemilik,
                 status: "menunggu",
-                createdAt: new Date().toISOString(),
-              };
-              const rawWd = await AsyncStorage.getItem(OWN_WD_PFX + myId);
-              const allWd: WithdrawalRequest[] = rawWd ? JSON.parse(rawWd) : [];
-              await AsyncStorage.setItem(OWN_WD_PFX + myId, JSON.stringify([wd, ...allWd]));
+              });
               setShowWdForm(false);
               setWdJumlah("");
               await loadPencairan();
@@ -898,7 +877,6 @@ export default function OwnerDashboard() {
     );
   };
 
-  // ── Handlers paket ──
   const handleOpenUpgrade = () => {
     if (!upgradeTo) setShowPerpanjang(true);
     else            setShowUpgrade(true);
@@ -940,7 +918,6 @@ export default function OwnerDashboard() {
     );
   };
 
-  // TAMBAHAN: handle buka notif settings
   function handleOpenNotif() {
     markAllRead().then(() => setUnreadNotif(0));
     setShowNotifSettings(true);
@@ -949,26 +926,24 @@ export default function OwnerDashboard() {
   const MENU_ITEMS = [
     { icon: "🧾", label: "Buka Kasir",     color: SUCCESS,   locked: false,    onPress: () => setShowKasir(true) },
     { icon: "📊", label: "Laporan",         color: ACCENT,    locked: false,    onPress: () => setShowLaporan(true) },
-    { icon: "💰", label: "Rekap Keuangan",  color: "#0F766E", locked: false,    onPress: () => setShowRekap(true) }, // TAMBAHAN
+    { icon: "💰", label: "Rekap Keuangan",  color: "#0F766E", locked: false,    onPress: () => setShowRekap(true) }, 
     { icon: "📦", label: "Produk",          color: ORANGE,    locked: false,    onPress: () => setShowProduk(true) },
     { icon: "📋", label: "Stok",            color: TEAL,      locked: false,    onPress: () => setShowStok(true) },
     { icon: "🚚", label: "Kurir",           color: "#0E7490", locked: !canKurir, onPress: () => canKurir ? setShowKurir(true) : handleOpenUpgrade() },
     { icon: "👥", label: "Tim Kasir",       color: PURPLE,    locked: false,    onPress: () => setShowTimKasir(true) },
     { icon: "💸", label: "Pencairan",       color: "#0F766E", locked: false,    onPress: () => { loadPencairan(); setShowPencairan(true); } },
+    { icon: "💳", label: "Bayar Langganan", color: "#D97706", locked: false,    onPress: () => setShowPerpanjang(true) },
     { icon: "⚙️", label: "Pengaturan",     color: "#475569", locked: false,    onPress: () => setShowPengaturan(true) },
   ];
 
-  // ═══════════════════════════════════════════════════════════════════════════
   return (
     <View style={S.root}>
-      {/* Header */}
       <View style={[S.header, { backgroundColor: accentColor }]}>
         <View style={FLEX_ONE}>
           <Text style={S.headerTitle}>{myRegistration?.tokoName ?? "Toko Saya"}</Text>
           <Text style={S.headerSub}>{myRegistration?.jenisBisnis ?? "Owner Dashboard"}</Text>
         </View>
 
-        {/* TAMBAHAN: Tombol notifikasi dengan badge */}
         <TouchableOpacity style={S.notifBtn} onPress={handleOpenNotif}>
           <Text style={S.notifBtnIcon}>{"🔔"}</Text>
           {unreadNotif > 0 && (
@@ -1089,7 +1064,6 @@ export default function OwnerDashboard() {
           </TouchableOpacity>
         )}
 
-        {/* Info Toko */}
         <View style={S.tokoCard}>
           <Text style={S.tokoCardTitle}>{"Info Toko"}</Text>
           <View style={S.tokoRow}>
@@ -1118,7 +1092,6 @@ export default function OwnerDashboard() {
           </View>
         </View>
 
-        {/* Produk Info */}
         <View style={S.produkInfoCard}>
           <Text style={S.produkInfoIcon}>{"📦"}</Text>
           <View style={FLEX_ONE}>
@@ -1151,7 +1124,6 @@ export default function OwnerDashboard() {
           </View>
         </View>
 
-        {/* Statistik Hari Ini */}
         <View style={S.statsSectionHeader}>
           <Text style={S.menuSectionTitle}>{"Statistik Hari Ini"}</Text>
           <TouchableOpacity style={S.refreshBtn} onPress={loadStats}>
@@ -1237,7 +1209,6 @@ export default function OwnerDashboard() {
         <LaporanScreen ownerId={myId} onBack={() => setShowLaporan(false)} />
       </Modal>
 
-      {/* TAMBAHAN: Modal Rekap Keuangan */}
       <Modal visible={showRekap} animationType="slide" onRequestClose={() => setShowRekap(false)}>
         <RekapKeuanganScreen
           ownerId={myId}
@@ -1334,7 +1305,6 @@ export default function OwnerDashboard() {
         </View>
       </Modal>
 
-      {/* TAMBAHAN: Modal Notif Settings */}
       <Modal
         visible={showNotifSettings}
         animationType="slide"
@@ -1805,13 +1775,10 @@ const S = StyleSheet.create({
   paketBadge:    { borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, alignItems: "center", marginLeft: 12, opacity: 0.9 },
   paketBadgeTxt: { color: "#fff", fontSize: 13, fontWeight: "800" },
   paketBadgeSub: { color: "rgba(255,255,255,0.7)", fontSize: 9, marginTop: 1 },
-
-  // TAMBAHAN: notif button
   notifBtn:      { position: "relative", padding: 8, marginRight: 4 },
   notifBtnIcon:  { fontSize: 20 },
   notifBadge:    { position: "absolute", top: 2, right: 2, backgroundColor: DANGER, borderRadius: 8, minWidth: 16, height: 16, justifyContent: "center", alignItems: "center", paddingHorizontal: 3 },
   notifBadgeTxt: { color: "#fff", fontSize: 9, fontWeight: "900" },
-
   trialBanner:        { backgroundColor: "#ECFDF5", margin: 16, marginBottom: 4, borderRadius: 14, padding: 16, flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1.5, borderColor: "#86EFAC" },
   trialBannerUrgent:  { backgroundColor: "#FEF9C3", borderColor: "#FCD34D" },
   trialBannerTitle:   { fontSize: 14, fontWeight: "800", color: "#1E293B", marginBottom: 2 },
@@ -2007,8 +1974,6 @@ const S = StyleSheet.create({
   fVal:        { fontSize: 10, fontWeight: "700", textAlign: "center" },
   fCol0:       { flex: 2 },
   fCol1:       { flex: 1, alignItems: "center" },
-
-  // ── Pencairan styles ──
   pencairanScroll:          { padding: 16, paddingBottom: 40 },
   pencairanBottomSpacer:    { height: 40 },
   pencairanSaldoCard:       { backgroundColor: "#0F766E", borderRadius: 16, padding: 18, marginBottom: 12, alignItems: "center" },

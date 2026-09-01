@@ -1,8 +1,5 @@
-// src/screens/LoginScreen.tsx — v2 FIXED
-// Fix: owner login baca PIN dari AsyncStorage langsung, kasir load tanpa reloadKasir
-
+// src/screens/LoginScreen.tsx — v8 AXIOSCLIENT FIX
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import axios from "axios";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -12,18 +9,17 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { Snackbar, Text, TextInput } from "react-native-paper";
+import { Checkbox, Snackbar, Text, TextInput } from "react-native-paper";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { API_BASE_URL } from "../config/api.config";
-import { useAuth } from "../context/AuthContext";
+import axiosClient from "../config/axiosClient"; // SUDAH DIPERBAIKI: Pakai axiosClient
+import { useAuth, UserRole } from "../context/AuthContext";
 import { useMarketing } from "../context/MarketingContext";
 import { useStore } from "../context/StoreContext";
-
-const SUPER_ADMIN_PIN = "123456";
 
 type MitraRole = "marketing" | "sub_marketing" | "kurir" | "super_admin";
 type Step =
   | "welcome"
+  | "agreement"
   | "pathSelect"
   | "setupToko"
   | "tokoLogin"
@@ -71,15 +67,14 @@ export default function LoginScreen() {
   const [showPin,         setShowPin]         = useState(false);
   const [snackbar,        setSnackbar]        = useState("");
   const [logoTap,         setLogoTap]         = useState(0);
-
-  // ← FIX: kasir di-load langsung dari AsyncStorage (bukan dari AuthContext)
+  
+  const [agreeLegal,      setAgreeLegal]      = useState(false);
   const [localKasir, setLocalKasir] = useState<any[]>([]);
 
   const kodeRef  = useRef<RNTextInput>(null);
   const phoneRef = useRef<RNTextInput>(null);
   const pinRef   = useRef<RNTextInput>(null);
 
-  // ← FIX: Load kasir dari AsyncStorage saat masuk step tokoLogin
   useEffect(() => {
     if (step !== "tokoLogin") return;
     AsyncStorage.getItem("@twd_kasir_accounts").then((raw) => {
@@ -90,7 +85,6 @@ export default function LoginScreen() {
 
   const currentOwner = storeKode ? findOwnerByKode(storeKode) : null;
 
-  // ← FIX: Filter kasir dari localKasir (bukan kasirAccounts dari AuthContext)
   const filteredKasir = localKasir.filter((k: any) => {
     if (!k.ownerId)    return true;
     if (!currentOwner) return true;
@@ -103,18 +97,27 @@ export default function LoginScreen() {
     setKodeInput(""); setKodeValid(null); setKodeResult(null);
   };
 
-  // ── Validasi Kode Toko ───────────────────────────────────────────────────
-  const handleValidasiKode = () => {
+  const handleValidasiKode = async () => {
     const kode = kodeInput.trim().toUpperCase();
     if (!kode) { setSnackbar("Masukkan kode toko terlebih dahulu"); return; }
-    const found = findOwnerByKode(kode);
-    if (!found) {
+
+    try {
+      // SUDAH DIPERBAIKI: Pakai axiosClient
+      const res = await axiosClient.get(`/auth/validate-kode?kode=${kode}`);
+      if (res.data && res.data.status === "success") {
+        setKodeValid(true);
+        setKodeResult({ 
+          tokoName: res.data.data.tokoName || res.data.data.name, 
+          ownerName: res.data.data.name 
+        });
+      } else {
+        setKodeValid(false);
+        setSnackbar("Kode toko tidak ditemukan di server.");
+      }
+    } catch (err: any) {
       setKodeValid(false);
-      setSnackbar("Kode toko tidak ditemukan. Hubungi marketing Anda.");
-      return;
+      setSnackbar("Kode toko tidak ditemukan di server.");
     }
-    setKodeValid(true);
-    setKodeResult({ tokoName: found.tokoName, ownerName: found.name });
   };
 
   const handleKonfirmasiSetup = async () => {
@@ -128,33 +131,55 @@ export default function LoginScreen() {
     setStep("tokoLogin");
   };
 
-  // ── Login Toko ───────────────────────────────────────────────────────────
-  // ← FIX: async, PIN owner dibaca dari AsyncStorage langsung
-  const handleTokoLogin = async () => {
+      const handleTokoLogin = async () => {
     if (tokoMode === "owner") {
-      const owner = storeKode ? findOwnerByKode(storeKode) : null;
-      if (!owner?.id) {
-        setSnackbar("Data owner tidak ditemukan. Ulangi setup toko.");
+      try {
+        // 1. Ambil data owner dari server berdasarkan kode toko
+        const res = await axiosClient.get(`/auth/validate-kode?kode=${storeKode}`);
+        const ownerData = res.data.data;
+
+        if (!ownerData?.id) {
+          setSnackbar("Data owner tidak ditemukan di server.");
+          return;
+        }
+
+        const ownerId = ownerData.id;
+        const ownerName = ownerData.name;
+        const ownerEmail = ownerData.email; // Kita butuh email ini untuk login JWT
+
+        // 2. Login ke backend untuk mendapatkan JWT Token
+        try {
+          const loginRes = await axiosClient.post(`/auth/login`, {
+            email: ownerEmail,
+            pin: pin,
+            password: pin, // Backend mungkin menerima field password atau pin
+          });
+
+          const token = loginRes.data?.data?.token || loginRes.data?.token;
+          
+          if (token) {
+            // 3. Simpan Token & ID ke AsyncStorage
+            await AsyncStorage.setItem("twd_token", token);
+            await AsyncStorage.setItem("twd_user_id", String(ownerId));
+            await AsyncStorage.setItem("twd_owner_id", String(ownerId));
+            
+            // 4. Masuk ke aplikasi
+            login("owner", ownerName ?? "Owner", String(ownerId));
+            return;
+          } else {
+            setSnackbar("Login gagal. Token tidak diterima dari server.");
+            return;
+          }
+        } catch (loginErr: any) {
+          const errorMsg = loginErr.response?.data?.message || loginErr.response?.data?.error || "Gagal login, periksa PIN & koneksi internet.";
+          setSnackbar(errorMsg);
+          setPin("");
+          return;
+        }
+      } catch (error: any) {
+        setSnackbar("Gagal terhubung ke server. Cek koneksi internet.");
         return;
       }
-
-      // Baca PIN dari AsyncStorage — ownerPin di AuthContext belum terisi saat belum login
-      const storedPin = await AsyncStorage.getItem("twd_owner_pin_" + owner.id);
-
-      if (!storedPin) {
-        // PIN belum pernah diset → izinkan masuk pertama kali tanpa PIN
-        login("owner", owner.name ?? "Owner", owner.id);
-        return;
-      }
-
-      if (pin !== storedPin) {
-        setSnackbar("PIN Owner salah!");
-        setPin("");
-        return;
-      }
-
-      login("owner", owner.name ?? "Owner", owner.id);
-      return;
     }
 
     if (tokoMode === "kasir") {
@@ -168,145 +193,64 @@ export default function LoginScreen() {
         setSnackbar("Gagal login: data owner tidak ditemukan. Hubungi pemilik toko.");
         return;
       }
+      // Kasir mungkin tidak butuh JWT backend jika hanya pakai data lokal, tapi kita simpan owner id-nya
+      await AsyncStorage.setItem("twd_owner_id", String(resolvedOwnerId));
       login("kasir", kasir.name, kasir.id, resolvedOwnerId);
     }
   };
 
-  // ── Login Mitra ──────────────────────────────────────────────────────────
+  // ── Login Mitra (CEK KE SERVER) ──────────────────────────────────────────────
+    // ── Login Mitra (CEK KE SERVER) ──────────────────────────────────────────────
   const handleMitraLogin = async () => {
     if (!mitraRole) return;
     const cleanPhone = normalizePhone(phone);
     const cleanPin   = pin.trim();
 
-    if (mitraRole === "super_admin") {
-      if (cleanPin !== SUPER_ADMIN_PIN) { setSnackbar("PIN salah!"); setPin(""); return; }
-      login("super_admin", "Super Admin");
-      return;
+    if (mitraRole !== "super_admin" && !cleanPhone) { 
+      setSnackbar("Masukkan nomor HP"); return; 
     }
+    if (!cleanPin) { setSnackbar("Masukkan PIN"); return; }
 
-    if (mitraRole === "marketing" || mitraRole === "sub_marketing") {
-      if (!cleanPhone) { setSnackbar("Masukkan nomor HP"); return; }
-      let acc = loginMarketing(cleanPhone, cleanPin) || loginMarketing(phone.trim(), cleanPin);
-      // ✅ Fallback Cloud Login VPS Biznet Gio: Jika akun marketing dibuat dari HP lain
-      if (!acc) {
-        try {
-          const res = await axios.post(`${API_BASE_URL}/auth/login`, {
-            phone: cleanPhone,
-            pin: cleanPin,
-            role: mitraRole,
-          }, { timeout: 4000 });
-          if (res.data && res.data.status === "success" && res.data.data?.user) {
-            const u = res.data.data.user;
-            acc = {
-              id: u.id,
-              name: u.name || "Marketing Mitra",
-              phone: u.phone || cleanPhone,
-              pin: cleanPin,
-              role: u.role || mitraRole,
-              wilayah: "",
-            } as any;
-            try {
-              addMarketing({
-                name: acc.name,
-                phone: acc.phone,
-                pin: cleanPin,
-                role: acc.role as any,
-                wilayah: "",
-              } as any);
-            } catch (err) {}
-          }
-        } catch (err) {}
-      }
-      // ✅ Fallback Cloud Users Lookup (Cek langsung dari daftar users cloud jika login API tertahan)
-      if (!acc) {
-        try {
-          const res = await axios.get(`${API_BASE_URL}/auth/users`, { timeout: 4000 });
-          if (res.data && res.data.status === "success" && Array.isArray(res.data.data)) {
-            const found = res.data.data.find((u: any) =>
-              (u.role === "marketing" || u.role === "sub_marketing") &&
-              (u.phone === cleanPhone || u.phone === phone.trim()) &&
-              (u.pin === cleanPin || cleanPin === "123456" || !u.pin)
-            );
-            if (found) {
-              acc = {
-                id: found.id,
-                name: found.name || "Marketing Mitra",
-                phone: found.phone || cleanPhone,
-                pin: cleanPin,
-                role: found.role || mitraRole,
-                wilayah: "",
-              } as any;
-              try {
-                addMarketing({
-                  name: acc.name,
-                  phone: acc.phone,
-                  pin: cleanPin,
-                  role: acc.role as any,
-                  wilayah: "",
-                } as any);
-              } catch (err) {}
-            }
-          }
-        } catch (err) {}
-      }
-      if (!acc) { setSnackbar("HP atau PIN salah!"); setPin(""); return; }
-      login(mitraRole, acc.name, acc.id);
-      return;
-    }
+    try {
+      const res = await axiosClient.post(`/auth/login`, {
+        phone: cleanPhone || null,
+        pin: cleanPin,
+        password: cleanPin, 
+        role: mitraRole,
+      }, { timeout: 10000 });
 
-    if (mitraRole === "kurir") {
-      if (!cleanPhone) { setSnackbar("Masukkan nomor HP"); return; }
-      let acc = loginKurir(cleanPhone, cleanPin) || loginKurir(phone.trim(), cleanPin);
-      // ✅ Fallback Cloud Login VPS Biznet Gio untuk Kurir dari HP lain
-      if (!acc) {
+      // ✨ ROBUST CHECK: Tangkap berbagai format respons backend
+      const isSuccess = res.data?.status === "success" || res.data?.message === "Login successful" || res.data?.message === "Login berhasil.";
+      const token = res.data?.data?.token || res.data?.token;
+      const userData = res.data?.data?.user || res.data?.user || res.data?.owner;
+
+      if (isSuccess && token && userData) {
         try {
-          const res = await axios.post(`${API_BASE_URL}/auth/login`, {
-            phone: cleanPhone,
-            pin: cleanPin,
-            role: "kurir",
-          }, { timeout: 4000 });
-          if (res.data && res.data.status === "success" && res.data.data?.user) {
-            const u = res.data.data.user;
-            acc = {
-              id: u.id,
-              name: u.name || "Kurir",
-              phone: u.phone || cleanPhone,
-              pin: cleanPin,
-              wilayah: "",
-              verified: true,
-            } as any;
-          }
-        } catch (err) {}
+          // PENTING: Simpan Token & ID User ke AsyncStorage
+          await AsyncStorage.setItem("twd_token", token);
+          await AsyncStorage.setItem("twd_user_id", String(userData.id));
+        } catch (storageErr) {
+          console.error("Gagal menyimpan token ke AsyncStorage:", storageErr);
+        }
+
+        const roleFromDB = (userData.role || mitraRole) as UserRole;
+        Alert.alert(
+          "DEBUG LOGIN", 
+          `Role dari Backend: ${userData.role}\nRole Mitra: ${mitraRole}\nRole Final: ${roleFromDB}`
+        );
+        
+        login(roleFromDB, userData.name || "User", String(userData.id));
+      } else {
+        setSnackbar(res.data?.message || "Login gagal. Periksa kembali PIN dan No HP.");
+        setPin("");
       }
-      // ✅ Fallback Cloud Users Lookup untuk Kurir
-      if (!acc) {
-        try {
-          const res = await axios.get(`${API_BASE_URL}/auth/users`, { timeout: 4000 });
-          if (res.data && res.data.status === "success" && Array.isArray(res.data.data)) {
-            const found = res.data.data.find((u: any) =>
-              u.role === "kurir" &&
-              (u.phone === cleanPhone || u.phone === phone.trim()) &&
-              (u.pin === cleanPin || cleanPin === "123456" || !u.pin)
-            );
-            if (found) {
-              acc = {
-                id: found.id,
-                name: found.name || "Kurir",
-                phone: found.phone || cleanPhone,
-                pin: cleanPin,
-                wilayah: "",
-                verified: true,
-              } as any;
-            }
-          }
-        } catch (err) {}
-      }
-      if (!acc) { setSnackbar("HP atau PIN salah!"); setPin(""); return; }
-      login("kurir", acc.name, acc.id);
+    } catch (err: any) {
+      const errorMsg = err.response?.data?.message || err.response?.data?.error || "Gagal terhubung ke server. Periksa koneksi internet.";
+      setSnackbar(errorMsg);
+      setPin("");
     }
   };
 
-  // ── Secret reset (tap logo 7x) ───────────────────────────────────────────
   const handleLogoTap = () => {
     const n = logoTap + 1;
     setLogoTap(n);
@@ -331,9 +275,6 @@ export default function LoginScreen() {
     }
   };
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // STEP — Welcome
-  // ═════════════════════════════════════════════════════════════════════════
   if (step === "welcome") {
     return (
       <View style={S.welcomeRoot}>
@@ -352,7 +293,7 @@ export default function LoginScreen() {
         <View style={S.welcomeFooter}>
           <TouchableOpacity
             style={S.btnPrimary}
-            onPress={() => { resetForm(); setStep("pathSelect"); }}
+            onPress={() => { resetForm(); setStep("agreement"); }}
             activeOpacity={0.85}
           >
             <Text style={S.btnPrimaryText}>Masuk ke Aplikasi</Text>
@@ -366,14 +307,64 @@ export default function LoginScreen() {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // STEP — Pilih Jalur
-  // ═════════════════════════════════════════════════════════════════════════
-  if (step === "pathSelect") {
+  if (step === "agreement") {
     return (
       <SafeAreaView style={S.pageRoot}>
         <View style={S.pageHeader}>
           <TouchableOpacity onPress={() => setStep("welcome")} style={S.backBtn}>
+            <Text style={S.backArrow}>←</Text>
+          </TouchableOpacity>
+          <Text style={S.pageTitle}>Syarat & Ketentuan</Text>
+          <View style={S.backBtn} />
+        </View>
+        
+        <ScrollView contentContainerStyle={S.agreementContent}>
+          <View style={S.formCard}>
+            <Text style={S.agreementTitle}>Perjanjian Layanan TWD-Mobile</Text>
+            <Text style={S.agreementText}>
+              Selamat datang di Toko Warung Digital (TWD). Sebelum menggunakan aplikasi, mohon baca ketentuan berikut:
+              {"\n\n"}
+              1. Data Pribadi: Kami mengumpulkan data seperti nama, nomor HP, dan data transaksi untuk keperluan operasional aplikasi.
+              {"\n\n"}
+              2. Keamanan: Data Anda disimpan di server cloud yang aman. Transaksi pembayaran diproses melalui pihak ketiga tepercaya (Mayar.id).
+              {"\n\n"}
+              3. Tanggung Jawab: Pengguna bertanggung jawab atas keakuratan data toko, stok, dan transaksi yang dimasukkan ke dalam aplikasi.
+              {"\n\n"}
+              4. Pembatalan: TWD berhak menonaktifkan akun yang melanggar ketentuan layanan atau melakukan tindakan penipuan/fraud.
+              {"\n\n"}
+              Dengan mencentang tombol di bawah, Anda menyatakan telah membaca, memahami, dan menyetujui Syarat & Ketentuan serta Kebijakan Privasi TWD-Mobile.
+            </Text>
+          </View>
+          
+          <TouchableOpacity 
+            style={S.checkboxRow} 
+            onPress={() => setAgreeLegal(!agreeLegal)}
+          >
+            <Checkbox 
+              status={agreeLegal ? 'checked' : 'unchecked'} 
+              color="#2E7D32"
+            />
+            <Text style={S.checkboxLabel}>Saya setuju dengan syarat & ketentuan di atas</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={agreeLegal ? [S.btnPrimary, S.btnGreen] : [S.btnPrimary, S.btnGreen, S.btnDisabled]}
+            disabled={!agreeLegal}
+            onPress={() => setStep("pathSelect")}
+            activeOpacity={0.85}
+          >
+            <Text style={S.btnPrimaryText}>Lanjutkan</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  if (step === "pathSelect") {
+    return (
+      <SafeAreaView style={S.pageRoot}>
+        <View style={S.pageHeader}>
+          <TouchableOpacity onPress={() => setStep("agreement")} style={S.backBtn}>
             <Text style={S.backArrow}>←</Text>
           </TouchableOpacity>
           <Text style={S.pageTitle}>Pilih Jalur Masuk</Text>
@@ -413,9 +404,6 @@ export default function LoginScreen() {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // STEP — Setup Toko
-  // ═════════════════════════════════════════════════════════════════════════
   if (step === "setupToko") {
     return (
       <SafeAreaView style={S.pageRoot}>
@@ -479,9 +467,6 @@ export default function LoginScreen() {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // STEP — Login Toko
-  // ═════════════════════════════════════════════════════════════════════════
   if (step === "tokoLogin") {
     const showPinInput  = tokoMode === "owner" || (tokoMode === "kasir" && !!selectedKasirId);
     const loginDisabled = pin.length < 4 || !tokoMode || (tokoMode === "kasir" && !selectedKasirId);
@@ -612,7 +597,6 @@ export default function LoginScreen() {
                     />
                   }
                 />
-                {/* Info owner belum punya PIN */}
                 {tokoMode === "owner" && (
                   <Text style={S.pinHintTxt}>
                     Belum punya PIN? Login pertama kali bebas PIN — atur PIN di dashboard Owner.
@@ -639,9 +623,6 @@ export default function LoginScreen() {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // STEP — Mitra: Pilih Role
-  // ═════════════════════════════════════════════════════════════════════════
   if (step === "mitraRoleSelect") {
     return (
       <SafeAreaView style={S.pageRoot}>
@@ -679,9 +660,6 @@ export default function LoginScreen() {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // STEP — Mitra: Form Login
-  // ═════════════════════════════════════════════════════════════════════════
   if (step === "mitraForm" && mitraRole) {
     const roleConfig    = MITRA_ROLES.find(r => r.value === mitraRole)!;
     const needsPhone    = mitraRole === "marketing" || mitraRole === "sub_marketing" || mitraRole === "kurir";
@@ -765,11 +743,9 @@ export default function LoginScreen() {
   return null;
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
 const GREEN = "#2E7D32";
 
 const S = StyleSheet.create({
-  // Welcome
   welcomeRoot:          { flex: 1, backgroundColor: "#1B5E20", justifyContent: "space-between" },
   welcomeBody:          { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32 },
   logoBox:              { width: 100, height: 100, borderRadius: 28, backgroundColor: "rgba(255,255,255,0.15)", alignItems: "center", justifyContent: "center", marginBottom: 24 },
@@ -780,7 +756,12 @@ const S = StyleSheet.create({
   welcomeFooter:        { paddingHorizontal: 32, paddingBottom: 48, alignItems: "center", gap: 14 },
   versionText:          { color: "rgba(255,255,255,0.4)", fontSize: 12 },
 
-  // Common
+  agreementContent:     { flexGrow: 1, padding: 20, gap: 16 },
+  agreementTitle:       { fontSize: 18, fontWeight: "900", color: "#1F2D1F", marginBottom: 12, textAlign: "center" },
+  agreementText:        { fontSize: 14, color: "#444", lineHeight: 22 },
+  checkboxRow:          { flexDirection: "row", alignItems: "center", paddingVertical: 8 },
+  checkboxLabel:        { fontSize: 14, color: "#333", flex: 1, flexWrap: 'wrap' },
+
   pageRoot:             { flex: 1, backgroundColor: "#FAFAFA" },
   pageHeader:           { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 14 },
   pageTitle:            { fontSize: 18, fontWeight: "800", color: "#1F2D1F" },
@@ -798,7 +779,6 @@ const S = StyleSheet.create({
   emptyBox:             { backgroundColor: "#F5F5F5", borderRadius: 12, padding: 16, marginBottom: 12 },
   emptyText:            { fontSize: 13, color: "#888", textAlign: "center", lineHeight: 20 },
 
-  // Path select
   pathContainer:        { flex: 1, padding: 20, gap: 16, justifyContent: "center" },
   pathCard:             { borderRadius: 20, padding: 28, alignItems: "center", elevation: 3, gap: 8 },
   pathCardToko:         { backgroundColor: "#E8F5E9", borderWidth: 2, borderColor: GREEN + "66" },
@@ -809,7 +789,6 @@ const S = StyleSheet.create({
   pathCardBadge:        { backgroundColor: GREEN, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 4, marginTop: 4 },
   pathCardBadgeText:    { color: "#FFF", fontSize: 12, fontWeight: "700" },
 
-  // Setup toko
   setupContent:         { flexGrow: 1, padding: 20, gap: 20 },
   setupIconBox:         { alignItems: "center", paddingTop: 8 },
   setupIcon:            { fontSize: 56 },
@@ -822,13 +801,11 @@ const S = StyleSheet.create({
   kodeInvalidBox:       { backgroundColor: "#FFEBEE", borderRadius: 12, padding: 14, marginBottom: 12 },
   kodeInvalidText:      { fontSize: 13, color: "#C62828", fontWeight: "600" },
 
-  // Store info bar
   storeInfoBar:         { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: GREEN, paddingHorizontal: 20, paddingVertical: 14 },
   storeInfoIcon:        { fontSize: 28 },
   storeInfoName:        { fontSize: 16, fontWeight: "800", color: "#FFF" },
   storeInfoKode:        { fontSize: 11, color: "rgba(255,255,255,0.7)" },
 
-  // Mode select
   modeOption:           { flexDirection: "row", alignItems: "center", gap: 14, backgroundColor: "#F5F5F5", borderRadius: 14, padding: 16, marginBottom: 10 },
   modeOptionIcon:       { fontSize: 28 },
   modeOptionTitle:      { fontSize: 15, fontWeight: "700", color: "#1F2D1F" },
@@ -838,7 +815,6 @@ const S = StyleSheet.create({
   modeChangeBtn:        { fontSize: 13, color: GREEN, fontWeight: "600" },
   modeSelectedLabel:    { fontSize: 15, fontWeight: "700", color: "#1F2D1F" },
 
-  // Kasir list
   kasirOption:          { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 14, borderRadius: 12, borderWidth: 1.5, borderColor: "#E0E0E0", marginBottom: 8, backgroundColor: "#FFF" },
   kasirOptionSelected:  { backgroundColor: GREEN, borderColor: GREEN },
   kasirOptionInfo:      { flex: 1 },
@@ -847,10 +823,8 @@ const S = StyleSheet.create({
   kasirWarnTxt:         { fontSize: 10, color: "#F59E0B", marginTop: 2 },
   kasirCheck:           { fontSize: 16, color: "#FFF", fontWeight: "800" },
 
-  // PIN hint
   pinHintTxt:           { fontSize: 11, color: "#888", marginBottom: 10, textAlign: "center", fontStyle: "italic" },
 
-  // Mitra roles
   roleSubtitle:         { fontSize: 14, color: "#888", paddingHorizontal: 20, marginBottom: 12 },
   roleGrid:             { paddingHorizontal: 16, paddingBottom: 32, gap: 12 },
   roleCard:             { borderRadius: 16, borderWidth: 1.5, padding: 18, flexDirection: "row", alignItems: "center", gap: 14, elevation: 1 },
@@ -860,7 +834,6 @@ const S = StyleSheet.create({
   roleCardArrow:        { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", marginLeft: "auto" },
   roleCardArrowText:    { color: "#FFF", fontSize: 18, fontWeight: "700" },
 
-  // Mitra form
   formBadgeWrap:        { alignItems: "center", paddingVertical: 20, paddingHorizontal: 24 },
   formBadge:            { width: 72, height: 72, borderRadius: 20, alignItems: "center", justifyContent: "center", marginBottom: 12, elevation: 3 },
   formBadgeIcon:        { fontSize: 36 },

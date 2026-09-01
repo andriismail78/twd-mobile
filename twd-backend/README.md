@@ -25,7 +25,7 @@ Backend ini merupakan pusat sinkronisasi data *real-time* untuk seluruh ekosiste
    ```bash
    docker-compose up -d
    ```
-3. Docker akan otomatis membuat container **PostgreSQL 16** dan menjalankan **TWD Backend API** di `http://localhost:5000`.
+3. Docker akan otomatis membuat container **PostgreSQL 16** dan menjalankan **TWD Backend API** di `http://http://103.127.97.28:5000`.
 
 ---
 
@@ -48,7 +48,7 @@ Backend ini merupakan pusat sinkronisasi data *real-time* untuk seluruh ekosiste
    ```bash
    npm run dev
    ```
-   Server API siap merespons di `http://localhost:5000`.
+   Server API siap merespons di `http://103.127.97.28:5000`.
 
 ---
 

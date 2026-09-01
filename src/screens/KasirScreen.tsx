@@ -20,9 +20,10 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import TwdLogoBadge from "../components/TwdLogoBadge";
+import axiosClient from "../config/axiosClient";
 import { useAuth } from "../context/AuthContext";
 import { useProducts } from "../context/ProductsContext";
-import TwdLogoBadge from "../components/TwdLogoBadge";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -374,31 +375,45 @@ export default function KasirScreen({
   }, [products]);
 
   // ── Load riwayat ──────────────────────────────────────────────────────
-  const loadRecentTx = useCallback(async () => {
+    const loadRecentTx = useCallback(async () => {
     if (!ownerIdValid) return;
     try {
-      const raw = await AsyncStorage.getItem(txKey(resolvedOwnerId));
-      const all: Transaction[] = raw ? JSON.parse(raw) : [];
+      // ✅ FETCH DARI SERVER
+      const res = await axiosClient.get(`/orders?ownerId=${resolvedOwnerId}`);
+      const serverOrders = res.data.data || [];
+      const completed = serverOrders
+        .filter((o: any) => o.status === 'selesai')
+        .map((o: any) => ({
+          ...o,
+          items: typeof o.items === 'string' ? JSON.parse(o.items || '[]') : o.items,
+          tanggal: (o.createdAt || '').slice(0, 10),
+          bayar: o.bayar || o.total,
+          kembalian: o.kembalian || 0,
+          diskon: o.diskon || 0,
+          namaToko: namaToko,
+          notes: o.note || o.catatanKasir,
+        })) as Transaction[];
+        
       const batas = new Date(); batas.setDate(batas.getDate() - 7);
-      const filtered = all
-        .filter((t) => new Date(t.createdAt) >= batas)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      const filtered = completed.filter((t) => new Date(t.createdAt) >= batas);
       setRecentTx(filtered);
       setOmzetToday(filtered.filter((t) => t.tanggal === todayStr()).reduce((s, t) => s + t.total, 0));
     } catch (e) { console.error("loadRecentTx:", e); }
-  }, [resolvedOwnerId, ownerIdValid]);
-
-  useEffect(() => { loadRecentTx(); }, [loadRecentTx]);
+  }, [resolvedOwnerId, ownerIdValid, namaToko]);
 
   // ── Load online orders ────────────────────────────────────────────────
-  const loadOnlineOrders = useCallback(async () => {
+    const loadOnlineOrders = useCallback(async () => {
     if (!ownerIdValid) return;
     try {
-      const raw = await AsyncStorage.getItem(ORDERS_KEY);
-      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
-      const mine = all
-        .filter((o) => String(o.ownerId ?? "").trim() === resolvedOwnerId)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      // ✅ FETCH DARI SERVER
+      const res = await axiosClient.get(`/orders?ownerId=${resolvedOwnerId}`);
+      const serverOrders = res.data.data || [];
+      const mine = serverOrders
+        .filter((o: any) => o.status !== 'selesai' && o.status !== 'dibatalkan')
+        .map((o: any) => ({
+          ...o,
+          items: typeof o.items === 'string' ? JSON.parse(o.items || '[]') : o.items,
+        })) as OnlineOrder[];
       setOnlineOrders(mine);
     } catch (e) { console.error("loadOnlineOrders:", e); }
   }, [resolvedOwnerId, ownerIdValid]);
@@ -571,86 +586,74 @@ export default function KasirScreen({
   };
 
   // ── Bayar kasir ───────────────────────────────────────────────────────
-  const handleBayar = async () => {
-  if (!canBayar) {
-    if (cart.length === 0) Alert.alert("Keranjang Kosong", "Tambah produk terlebih dahulu.");
-    else Alert.alert("Uang Kurang", "Jumlah bayar kurang dari total.");
-    return;
-  }
-  Keyboard.dismiss();
-  setShowBayar(false);
-  try {
-    const now   = new Date();
-    const txId  = genId("tx");
-    const BIAYA = 1000; // Rp 1.000 biaya layanan per transaksi
-
-    // ✅ Gunakan ProductsContext.addTransaksi (handles HPP + stock deduction + @twd_transaksi)
-    await addTransaksi({
-      id:           txId,
-      ownerId:      resolvedOwnerId,
-      items:        cart.map((c) => ({
-        productId: c.product.id,
-        name:      c.product.name,
-        price:     getProductPrice(c.product),
-        qty:       c.qty,
-      })),
-      subtotal,
-      diskon:       diskonVal,
-      biayaLayanan: BIAYA,
-      total:        total + BIAYA,
-      metodeBayar:  metode,
-      dibayar:      metode === "tunai" ? bayarVal : total + BIAYA,
-      kembalian:    metode === "tunai" ? Math.max(0, bayarVal - (total + BIAYA)) : 0,
-      kasirId:      resolvedKasirId,
-      kasirNama:    resolvedKasirName,
-    });
-
-    // ✅ Tetap simpan ke @twd_tx_{ownerId} untuk tampilan Riwayat di KasirScreen
-    const tx: Transaction = {
-      id:          txId,
-      ownerId:     resolvedOwnerId,
-      kasirId:     resolvedKasirId,
-      kasirName:   resolvedKasirName,
-      namaToko:    namaToko,
-      items:       cart.map((c) => ({
-        name:     c.product.name,
-        price:    getProductPrice(c.product),
-        qty:      c.qty,
-        subtotal: getProductPrice(c.product) * c.qty,
-      })),
-      subtotal,
-      diskon:      diskonVal,
-      total:       total + BIAYA,
-      bayar:       metode === "tunai" ? bayarVal : total + BIAYA,
-      kembalian:   metode === "tunai" ? Math.max(0, bayarVal - (total + BIAYA)) : 0,
-      metodeBayar: metode,
-      notes:       txNotes.trim() || undefined,
-      createdAt:   now.toISOString(),
-      tanggal:     now.toISOString().slice(0, 10),
-    };
-    await saveTxRecord(tx);
-
-    setLastTx(tx);
-    clearCart();
-    await loadProducts();
-    await loadRecentTx();
-    setShowStruk(true);
-    onTransactionDone?.();
-
-    // Cek low stock setelah transaksi
-    const rawProd = await AsyncStorage.getItem(PRODUCTS_KEY);
-    const allProd: StoreProduct[] = rawProd ? JSON.parse(rawProd) : [];
-    const mineProd = allProd.filter((p) => String(p.ownerId ?? "").trim() === resolvedOwnerId);
-    const kritis = mineProd
-      .filter((p) => p.stock === 0 || p.stock <= (p.stockMin ?? 5))
-      .map((p) => p.stock === 0 ? p.name + " (HABIS ‼️)" : p.name + " (sisa " + p.stock + ")");
-    if (kritis.length > 0) {
-      setTimeout(() => {
-        Alert.alert("⚠️ Peringatan Stok", "Stok berikut perlu segera diisi:\n\n" + kritis.join("\n"));
-      }, 1200);
+    const handleBayar = async () => {
+    if (!canBayar) {
+      if (cart.length === 0) Alert.alert("Keranjang Kosong", "Tambah produk terlebih dahulu.");
+      else Alert.alert("Uang Kurang", "Jumlah bayar kurang dari total.");
+      return;
     }
-  } catch (e) { Alert.alert("Error", "Gagal menyimpan transaksi: " + String(e)); }
-};
+    Keyboard.dismiss();
+    setShowBayar(false);
+    try {
+      const now   = new Date();
+      const txId  = genId("tx");
+      const BIAYA = 1000; // Rp 1.000 biaya layanan per transaksi
+
+      const payload = {
+        ownerId: resolvedOwnerId,
+        kasirId: resolvedKasirId,
+        kasirName: resolvedKasirName,
+        items: cart.map((c) => ({
+          productId: c.product.id,
+          name: c.product.name,
+          price: getProductPrice(c.product),
+          qty: c.qty,
+        })),
+        subtotal,
+        diskon: diskonVal,
+        total: total + BIAYA,
+        bayar: metode === "tunai" ? bayarVal : total + BIAYA,
+        kembalian: metode === "tunai" ? Math.max(0, bayarVal - (total + BIAYA)) : 0,
+        metodeBayar: metode,
+        status: "selesai", // ✅ Langsung selesai untuk POS Kasir
+      };
+
+      // ✅ POST KE SERVER
+      await axiosClient.post("/orders", payload);
+
+      // Simpan ke state lokal untuk tampilan struk
+      const tx: Transaction = {
+        id: txId,
+        ownerId: resolvedOwnerId,
+        kasirId: resolvedKasirId,
+        kasirName: resolvedKasirName,
+        namaToko: namaToko,
+        items: cart.map((c) => ({
+          name: c.product.name,
+          price: getProductPrice(c.product),
+          qty: c.qty,
+          subtotal: getProductPrice(c.product) * c.qty,
+        })),
+        subtotal,
+        diskon: diskonVal,
+        total: total + BIAYA,
+        bayar: metode === "tunai" ? bayarVal : total + BIAYA,
+        kembalian: metode === "tunai" ? Math.max(0, bayarVal - (total + BIAYA)) : 0,
+        metodeBayar: metode,
+        notes: txNotes.trim() || undefined,
+        createdAt: now.toISOString(),
+        tanggal: now.toISOString().slice(0, 10),
+      };
+      
+      setLastTx(tx);
+      clearCart();
+      await loadProducts();
+      await loadRecentTx();
+      setShowStruk(true);
+      onTransactionDone?.();
+
+    } catch (e) { Alert.alert("Error", "Gagal menyimpan transaksi ke server: " + String(e)); }
+  };
 
   // ── Share Struk ───────────────────────────────────────────────────────
   const handleShareStruk = async (tx: Transaction) => {
@@ -691,10 +694,9 @@ export default function KasirScreen({
   };
 
   // ── Online: Konfirmasi pesanan siap (menunggu → diproses) ─────────────
-  const handleKonfirmasiOrder = async () => {
+   const handleKonfirmasiOrder = async () => {
     if (!selectedOrder) return;
 
-    // Validasi stok sebelum konfirmasi
     const stokCheck = await validateStokOrder(selectedOrder);
     if (!stokCheck.ok) {
       Alert.alert("⚠️ Stok Tidak Cukup", stokCheck.pesan + "\n\nTambah stok terlebih dahulu atau batalkan pesanan.");
@@ -704,120 +706,43 @@ export default function KasirScreen({
     const kurir = selectedKurirId ? kurirList.find((k) => k.id === selectedKurirId) : null;
     setProcessingOrder(true);
     try {
-      // Simpan catatan kasir jika ada
-      if (catatanKasirInput.trim()) await saveCatatanKasir(selectedOrder.id, catatanKasirInput.trim());
-
-      const raw = await AsyncStorage.getItem(ORDERS_KEY);
-      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
-      const updated = all.map((o) =>
-        o.id === selectedOrder.id
-          ? {
-              ...o,
-              status: "diproses" as const,
-              kurirId: selectedKurirId || "",
-              kurirName: kurir?.name || "",
-              catatanKasir: catatanKasirInput.trim() || o.catatanKasir,
-            }
-          : o,
-      );
-      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
-      await loadOnlineOrders();
-      setSelectedOrder({
-        ...selectedOrder,
+      // ✅ UPDATE KE SERVER
+      await axiosClient.put(`/orders/${selectedOrder.id}/status`, {
         status: "diproses",
         kurirId: selectedKurirId || "",
         kurirName: kurir?.name || "",
-        catatanKasir: catatanKasirInput.trim() || selectedOrder.catatanKasir,
+        catatanKasir: catatanKasirInput.trim() || undefined,
       });
+
+      await loadOnlineOrders();
+      setSelectedOrder((prev) => prev ? {
+        ...prev,
+        status: "diproses",
+        kurirId: selectedKurirId || "",
+        kurirName: kurir?.name || "",
+        catatanKasir: catatanKasirInput.trim() || prev.catatanKasir,
+      } : prev);
+      
       Alert.alert(
         "Pesanan Siap 📦",
         selectedKurirId
           ? "Pesanan dikonfirmasi untuk kurir: " + kurir?.name
           : "Pesanan ditandai SIAP! Sekarang muncul di Dasbor Kurir untuk diambil kurir.",
       );
-    } catch { Alert.alert("Error", "Gagal konfirmasi pesanan."); }
+    } catch { Alert.alert("Error", "Gagal konfirmasi pesanan ke server."); }
     finally { setProcessingOrder(false); }
   };
 
   // ── Online: Update status lanjutan + pencatatan transaksi saat selesai ─
-  const handleUpdateOrderStatus = async (order: OnlineOrder, nextStatus: string) => {
+    const handleUpdateOrderStatus = async (order: OnlineOrder, nextStatus: string) => {
     setProcessingOrder(true);
     try {
-      // Jika menuju "selesai" → kurangi stok + catat transaksi
-      if (nextStatus === "selesai") {
-  const stokCheck = await validateStokOrder(order);
-  if (!stokCheck.ok) {
-    Alert.alert("⚠️ Stok Tidak Cukup", stokCheck.pesan);
-    setProcessingOrder(false);
-    return;
-  }
+      // ✅ UPDATE KE SERVER
+      await axiosClient.put(`/orders/${order.id}/status`, {
+        status: nextStatus,
+        namaPenerima: nextStatus === "selesai" ? "Customer" : undefined,
+      });
 
-  const now    = new Date();
-  const txId   = genId("tx");
-  const BIAYA  = 1000;
-
-  // ✅ ProductsContext.addTransaksi handles HPP + stock deduction
-  await addTransaksi({
-    id:           txId,
-    ownerId:      resolvedOwnerId,
-    items:        order.items.map((i) => ({
-      productId: i.productId,
-      name:      i.name,
-      price:     i.price,
-      qty:       i.qty,
-    })),
-    subtotal:     order.subtotal,
-    diskon:       0,
-    biayaLayanan: BIAYA,
-    total:        order.total + BIAYA,
-    metodeBayar:  order.metodeBayar ?? "online",
-    dibayar:      order.total + BIAYA,
-    kembalian:    0,
-    kasirId:      resolvedKasirId,
-    kasirNama:    resolvedKasirName,
-  });
-
-  // Simpan ke @twd_tx_{ownerId} untuk riwayat
-  const tx: Transaction = {
-    id:           txId,
-    ownerId:      resolvedOwnerId,
-    kasirId:      resolvedKasirId,
-    kasirName:    resolvedKasirName,
-    namaToko:     namaToko,
-    items:        order.items.map((i) => ({
-      name: i.name, price: i.price, qty: i.qty, subtotal: i.price * i.qty,
-    })),
-    subtotal:     order.subtotal,
-    diskon:       0,
-    total:        order.total + BIAYA,
-    bayar:        order.total + BIAYA,
-    kembalian:    0,
-    metodeBayar:  order.metodeBayar ?? "online",
-    notes:        order.catatanKasir || undefined,
-    sourceOrderId: order.id,
-    createdAt:    now.toISOString(),
-    tanggal:      now.toISOString().slice(0, 10),
-  };
-  await saveTxRecord(tx);
-  await loadRecentTx();
-  await loadProducts();
-
-  // Cek low stock
-  const rawProd = await AsyncStorage.getItem(PRODUCTS_KEY);
-  const allProd: StoreProduct[] = rawProd ? JSON.parse(rawProd) : [];
-  const kritis = allProd
-    .filter((p) => String(p.ownerId ?? "").trim() === resolvedOwnerId && (p.stock === 0 || p.stock <= (p.stockMin ?? 5)))
-    .map((p) => p.stock === 0 ? p.name + " (HABIS ‼️)" : p.name + " (sisa " + p.stock + ")");
-  if (kritis.length > 0) {
-    setTimeout(() => Alert.alert("⚠️ Peringatan Stok", kritis.join("\n")), 1200);
-  }
-}
-
-      // Update status order
-      const raw = await AsyncStorage.getItem(ORDERS_KEY);
-      const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
-      const updated = all.map((o) => o.id === order.id ? { ...o, status: nextStatus as any } : o);
-      await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
       await loadOnlineOrders();
       setSelectedOrder({ ...order, status: nextStatus as any });
 
@@ -826,22 +751,23 @@ export default function KasirScreen({
         ORDER_STATUS_LABEL[nextStatus] + "\n" +
         (nextStatus === "selesai" ? "Transaksi telah dicatat ke riwayat." : ""),
       );
+    
     } catch { Alert.alert("Error", "Gagal update status pesanan."); }
     finally { setProcessingOrder(false); }
   };
 
-  const handleBatalOrder = async (orderId: string) => {
+    const handleBatalOrder = async (orderId: string) => {
     Alert.alert("Batalkan Pesanan", "Yakin batalkan pesanan ini?", [
       { text: "Tidak", style: "cancel" },
       {
         text: "Batalkan", style: "destructive",
         onPress: async () => {
-          const raw = await AsyncStorage.getItem(ORDERS_KEY);
-          const all: OnlineOrder[] = raw ? JSON.parse(raw) : [];
-          const updated = all.map((o) => o.id === orderId ? { ...o, status: "dibatalkan" as const } : o);
-          await AsyncStorage.setItem(ORDERS_KEY, JSON.stringify(updated));
-          await loadOnlineOrders();
-          setShowOrderDetail(false);
+          try {
+            // ✅ UPDATE KE SERVER
+            await axiosClient.put(`/orders/${orderId}/status`, { status: "dibatalkan" });
+            await loadOnlineOrders();
+            setShowOrderDetail(false);
+          } catch { Alert.alert("Error", "Gagal membatalkan pesanan di server."); }
         },
       },
     ]);

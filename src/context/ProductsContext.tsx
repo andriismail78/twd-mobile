@@ -1,16 +1,18 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useState,
+    createContext,
+    useCallback,
+    useContext,
+    useEffect,
+    useState,
 } from "react";
+import { Alert } from "react-native";
+import axiosClient from "../config/axiosClient"; // SUDAH DIPERBAIKI: Pakai axiosClient
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────
 
-const STORAGE_KEY_PRODUCTS  = "@twd_products";
-const STORAGE_KEY_TRANSAKSI = "@twd_transaksi";
+const STORAGE_KEY_PRODUCTS  = "@twd_products"; // Masih dipakai untuk cache lokal
+const STORAGE_KEY_TRANSAKSI = "@twd_transaksi"; // Masih dipakai untuk cache lokal
 const STORAGE_KEY_METODE    = "@twd_metode_valuasi";
 const STOK_MENIPIS_DEFAULT  = 5;
 
@@ -67,13 +69,13 @@ export type Transaksi = {
   items:        TransaksiItem[];
   subtotal:     number;
   diskon:       number;
-  biayaLayanan: number;  // ← Rp 1.000 per transaksi
-  total:        number;  // sudah termasuk biayaLayanan
+  biayaLayanan: number;
+  total:        number;
   metodeBayar:  string;
   dibayar:      number;
   kembalian:    number;
   totalHPP:     number;
-  labaKotor:    number;  // total - biayaLayanan - totalHPP
+  labaKotor:    number;
 };
 
 export type AddTransaksiPayload = {
@@ -82,8 +84,8 @@ export type AddTransaksiPayload = {
   items:        { productId: string; name: string; price: number; qty: number }[];
   subtotal:     number;
   diskon:       number;
-  biayaLayanan: number;  // ← wajib diisi dari KasirScreen
-  total:        number;  // sudah termasuk biayaLayanan
+  biayaLayanan: number;
+  total:        number;
   metodeBayar:  string;
   dibayar:      number;
   kembalian:    number;
@@ -164,8 +166,6 @@ function hitungHPP(
   return { hppPerUnit: product.buyPrice, updatedBatches: product.batches };
 }
 
-// ─── Hitung average cost baru setelah restock ─────────────────────────────────
-
 function hitungAvgCostBaru(
   currentStock:   number,
   currentAvgCost: number,
@@ -185,124 +185,201 @@ export const ProductsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [isLoading,     setIsLoading]     = useState(true);
   const [metodeValuasi, setMetodeValuasi] = useState<MetodeValuasi | null>(null);
 
-  // ── Load dari AsyncStorage ─────────────────────────────────────────────────
+  // ── Load dari Server Cloud ─────────────────────────────────────────────────
+
+  const loadFromServer = useCallback(async () => {
+    try {
+      // AmbilOwnerId dari AsyncStorage (disimpan saat login)
+      const ownerId = await AsyncStorage.getItem("twd_owner_id");
+      if (!ownerId) {
+        setIsLoading(false);
+        return;
+      }
+
+      // Fetch Products
+      const prodRes = await axiosClient.get(`/products?ownerId=${ownerId}`);
+      const serverProducts = prodRes.data.map((p: any) => ({
+        ...p,
+        avgCost: p.buyPrice || 0,
+        batches: p.stock > 0 ? [{ batchId: p.id, buyPrice: p.buyPrice, qty: p.stock, tanggal: p.createdAt }] : []
+      }));
+      setProducts(serverProducts);
+      await AsyncStorage.setItem(STORAGE_KEY_PRODUCTS, JSON.stringify(serverProducts));
+
+      // Fetch Transaksi
+      const trxRes = await axiosClient.get(`/orders?ownerId=${ownerId}`);
+      setTransaksi(trxRes.data);
+      await AsyncStorage.setItem(STORAGE_KEY_TRANSAKSI, JSON.stringify(trxRes.data));
+
+    } catch (error) {
+      console.error("Gagal load dari server, memuat cache lokal:", error);
+      // Fallback ke lokal jika offline
+      const [pRaw, tRaw] = await Promise.all([
+        AsyncStorage.getItem(STORAGE_KEY_PRODUCTS),
+        AsyncStorage.getItem(STORAGE_KEY_TRANSAKSI),
+      ]);
+      if (pRaw) setProducts(JSON.parse(pRaw));
+      if (tRaw) setTransaksi(JSON.parse(tRaw));
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     (async () => {
-      try {
-        const [pRaw, tRaw, mRaw] = await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEY_PRODUCTS),
-          AsyncStorage.getItem(STORAGE_KEY_TRANSAKSI),
-          AsyncStorage.getItem(STORAGE_KEY_METODE),
-        ]);
-        if (pRaw) setProducts(JSON.parse(pRaw));
-        if (tRaw) setTransaksi(JSON.parse(tRaw));
-        if (mRaw) setMetodeValuasi(mRaw as MetodeValuasi);
-      } catch (e) {
-        console.error("Gagal load storage:", e);
-      } finally {
-        setIsLoading(false);
-      }
+      const mRaw = await AsyncStorage.getItem(STORAGE_KEY_METODE);
+      if (mRaw) setMetodeValuasi(mRaw as MetodeValuasi);
+      await loadFromServer();
     })();
-  }, []);
+  }, [loadFromServer]);
 
-  // ── Helpers Save ───────────────────────────────────────────────────────────
+  // ── Helpers Save Lokal (Cache) ──────────────────────────────────────────────
 
-  const saveProducts = useCallback(async (data: Product[]) => {
+  const saveProductsLocal = useCallback(async (data: Product[]) => {
     setProducts(data);
     await AsyncStorage.setItem(STORAGE_KEY_PRODUCTS, JSON.stringify(data));
   }, []);
 
-  const saveTransaksi = useCallback(async (data: Transaksi[]) => {
+  const saveTransaksiLocal = useCallback(async (data: Transaksi[]) => {
     setTransaksi(data);
     await AsyncStorage.setItem(STORAGE_KEY_TRANSAKSI, JSON.stringify(data));
   }, []);
-
-  // ── simpanMetode ───────────────────────────────────────────────────────────
 
   const simpanMetode = useCallback(async (metode: MetodeValuasi) => {
     setMetodeValuasi(metode);
     await AsyncStorage.setItem(STORAGE_KEY_METODE, metode);
   }, []);
 
-  // ── addProduct ─────────────────────────────────────────────────────────────
-  // ✅ PERBAIKAN: jangan buat batch jika stock = 0
-  // (kasus import produk global: stock awal 0, isi manual saat restock)
+  // ── addProduct (KIRIM KE SERVER) ────────────────────────────────────────────
 
   const addProduct = useCallback(
     async (data: Omit<Product, "id"|"avgCost"|"batches"|"createdAt"|"updatedAt">) => {
-      const now = new Date().toISOString();
-      const id  = Date.now().toString();
+      try {
+        // 1. Kirim ke Server Biznet
+        const res = await axiosClient.post(`/products`, {
+          ownerId:   data.ownerId,
+          name:      data.name,
+          barcode:   data.barcode,
+          sellPrice: data.sellPrice,
+          buyPrice:  data.buyPrice,
+          stock:     data.stock,
+          stockMin:  data.stockMin,
+          kategori:  data.kategori,
+          satuan:    data.satuan,
+        });
 
-      // Buat batch awal hanya jika stok > 0
-      const initialBatches: StokBatch[] = data.stock > 0
-        ? [{ batchId: id, buyPrice: data.buyPrice, qty: data.stock, tanggal: now }]
-        : [];
+        const newServerProduct = res.data;
 
-      const newProd: Product = {
-        ...data,
-        id,
-        stockMin:  data.stockMin ?? STOK_MENIPIS_DEFAULT,
-        avgCost:   data.buyPrice,
-        batches:   initialBatches,
-        createdAt: now,
-        updatedAt: now,
-      };
-      await saveProducts([...products, newProd]);
+        // 2. Update state lokal dengan data dari server
+        const now = new Date().toISOString();
+        const initialBatches: StokBatch[] = data.stock > 0
+          ? [{ batchId: newServerProduct.id, buyPrice: data.buyPrice, qty: data.stock, tanggal: now }]
+          : [];
+
+        const newProd: Product = {
+          ...data,
+          id:        newServerProduct.id,
+          stockMin:  data.stockMin ?? STOK_MENIPIS_DEFAULT,
+          avgCost:   data.buyPrice,
+          batches:   initialBatches,
+          createdAt: newServerProduct.createdAt || now,
+          updatedAt: now,
+        };
+
+        await saveProductsLocal([...products, newProd]);
+      } catch (error: any) {
+        Alert.alert("Gagal Simpan", error.response?.data?.error || "Gagal menyimpan produk ke server.");
+        throw error;
+      }
     },
-    [products, saveProducts],
+    [products, saveProductsLocal],
   );
 
-  // ── updateProduct ──────────────────────────────────────────────────────────
+  // ── updateProduct (KIRIM KE SERVER) ────────────────────────────────────────
 
   const updateProduct = useCallback(
     async (id: string, data: Partial<Omit<Product, "id"|"createdAt">>) => {
-      const updated = products.map(p =>
-        p.id === id ? { ...p, ...data, updatedAt: new Date().toISOString() } : p
-      );
-      await saveProducts(updated);
+      try {
+        // 1. Update ke Server
+        await axiosClient.put(`/products/${id}`, data);
+
+        // 2. Update lokal
+        const updated = products.map(p =>
+          p.id === id ? { ...p, ...data, updatedAt: new Date().toISOString() } : p
+        );
+        await saveProductsLocal(updated);
+      } catch (error: any) {
+        Alert.alert("Gagal Update", error.response?.data?.error || "Gagal update produk ke server.");
+        throw error;
+      }
     },
-    [products, saveProducts],
+    [products, saveProductsLocal],
   );
 
-  // ── deleteProduct ──────────────────────────────────────────────────────────
+  // ── deleteProduct (KIRIM KE SERVER) ────────────────────────────────────────
 
   const deleteProduct = useCallback(
     async (id: string) => {
-      await saveProducts(products.filter(p => p.id !== id));
+      try {
+        // 1. Hapus dari Server
+        await axiosClient.delete(`/products/${id}`);
+        // 2. Hapus dari lokal
+        await saveProductsLocal(products.filter(p => p.id !== id));
+      } catch (error: any) {
+        Alert.alert("Gagal Hapus", error.response?.data?.error || "Gagal menghapus produk dari server.");
+        throw error;
+      }
     },
-    [products, saveProducts],
+    [products, saveProductsLocal],
   );
 
-  // ── restockProduct ─────────────────────────────────────────────────────────
+  // ── restockProduct (KIRIM KE SERVER) ────────────────────────────────────────
 
   const restockProduct = useCallback(
     async (id: string, qty: number, buyPrice: number) => {
-      const now     = new Date().toISOString();
-      const updated = products.map(p => {
-        if (p.id !== id) return p;
-        const newAvgCost  = hitungAvgCostBaru(p.stock, p.avgCost, qty, buyPrice);
+      try {
+        const product = products.find(p => p.id === id);
+        if (!product) return;
+
+        const newStock = product.stock + qty;
+        const newAvgCost = hitungAvgCostBaru(product.stock, product.avgCost, qty, buyPrice);
+
+        // 1. Update stok di Server
+        await axiosClient.put(`/products/${id}`, {
+          stock: newStock,
+          buyPrice: buyPrice,
+        });
+
+        // 2. Update lokal dengan batch baru
+        const now = new Date().toISOString();
         const newBatch: StokBatch = {
           batchId:  id + "_" + Date.now(),
           buyPrice,
           qty,
           tanggal:  now,
         };
-        return {
-          ...p,
-          stock:     p.stock + qty,
-          buyPrice,
-          avgCost:   newAvgCost,
-          batches:   [...p.batches, newBatch],
-          updatedAt: now,
-        };
-      });
-      await saveProducts(updated);
+
+        const updated = products.map(p =>
+          p.id === id ? {
+            ...p,
+            stock:     newStock,
+            buyPrice,
+            avgCost:   newAvgCost,
+            batches:   [...p.batches, newBatch],
+            updatedAt: now,
+          } : p
+        );
+        await saveProductsLocal(updated);
+
+      } catch (error: any) {
+        Alert.alert("Gagal Restock", error.response?.data?.error || "Gagal update stok ke server.");
+        throw error;
+      }
     },
-    [products, saveProducts],
+    [products, saveProductsLocal],
   );
 
-  // ── addTransaksi ───────────────────────────────────────────────────────────
+  // ── addTransaksi / CHECKOUT KASIR (KIRIM KE SERVER) ────────────────────────
 
   const addTransaksi = useCallback(
     async (payload: AddTransaksiPayload) => {
@@ -329,6 +406,7 @@ export const ProductsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           qty:       item.qty,
         });
 
+        // Update stok lokal sementara
         updatedProducts[idx] = {
           ...product,
           stock:     product.stock - item.qty,
@@ -352,14 +430,50 @@ export const ProductsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         dibayar:      payload.dibayar,
         kembalian:    payload.kembalian,
         totalHPP,
-        // labaKotor = pendapatan produk (tanpa biaya layanan) - HPP
         labaKotor:    (payload.total - payload.biayaLayanan) - totalHPP,
       };
 
-      await saveProducts(updatedProducts);
-      await saveTransaksi([newTransaksi, ...transaksi]);
+      try {
+        // 1. Kirim data Transaksi ke Server Biznet
+        await axiosClient.post(`/orders`, {
+          id:           payload.id,
+          ownerId:      payload.ownerId,
+          kasirId:      payload.kasirId,
+          kasirName:    payload.kasirNama,
+          items:        JSON.stringify(transaksiItems), // Backend simpan sebagai JSON string
+          subtotal:     payload.subtotal,
+          diskon:       payload.diskon,
+          total:        payload.total,
+          bayar:        payload.dibayar,
+          kembalian:    payload.kembalian,
+          metodeBayar:  payload.metodeBayar,
+          type:         "pos",
+          status:       "selesai",
+        });
+
+        // 2. Update stok produk di server (Looping tiap produk)
+        for (const item of payload.items) {
+          const prod = updatedProducts.find(p => p.id === item.productId);
+          if (prod) {
+            await axiosClient.put(`/products/${item.productId}`, {
+              stock: prod.stock,
+            });
+          }
+        }
+
+        // 3. Jika sukses, simpan ke state lokal & AsyncStorage
+        await saveProductsLocal(updatedProducts);
+        await saveTransaksiLocal([newTransaksi, ...transaksi]);
+
+      } catch (error: any) {
+        Alert.alert("Gagal Checkout", "Transaksi disimpan lokal, tapi gagal kirim ke server. Cek koneksi internet.");
+        // Tetap simpan lokal agar kasir bisa lanjut transaksi lain
+        await saveProductsLocal(updatedProducts);
+        await saveTransaksiLocal([newTransaksi, ...transaksi]);
+        throw error;
+      }
     },
-    [products, transaksi, metodeValuasi, saveProducts, saveTransaksi],
+    [products, transaksi, metodeValuasi, saveProductsLocal, saveTransaksiLocal],
   );
 
   // ── Helpers Query ──────────────────────────────────────────────────────────
@@ -374,7 +488,7 @@ export const ProductsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [products],
   );
 
-  // ── Context Value ──────────────────────────────────────────────────────────
+  // ─── Context Value ──────────────────────────────────────────────────────────
 
   const contextValue: ProductsContextType = {
     products, transaksi, isLoading, metodeValuasi,

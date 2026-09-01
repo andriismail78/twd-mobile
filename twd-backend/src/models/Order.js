@@ -1,93 +1,59 @@
-// twd-backend/src/models/Order.js
-const { DataTypes } = require("sequelize");
-const { sequelize } = require("../config/database");
+const db = require('../utils/db');
 
-const Order = sequelize.define(
-  "Order",
-  {
-    id: {
-      type:         DataTypes.STRING,
-      defaultValue: () => "ord_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-      primaryKey:   true,
-    },
-    ownerId: {
-      type:         DataTypes.STRING,
-      allowNull:    false,
-    },
-    customerName: {
-      type:         DataTypes.STRING,
-      allowNull:    false,
-    },
-    customerPhone: {
-      type:         DataTypes.STRING,
-      allowNull:    true,
-    },
-    customerAddress: {
-      type:         DataTypes.TEXT,
-      allowNull:    true,
-    },
-    items: {
-      type:         DataTypes.JSONB,
-      allowNull:    false,
-      defaultValue: [],
-    },
-    subtotal: {
-      type:         DataTypes.DECIMAL(12, 2),
-      defaultValue: 0,
-    },
-    total: {
-      type:         DataTypes.DECIMAL(12, 2),
-      defaultValue: 0,
-    },
-    status: {
-      type:         DataTypes.ENUM("menunggu", "diproses", "dikirim", "selesai", "dibatalkan", "tertunda"),
-      defaultValue: "menunggu",
-    },
-    metodeBayar: {
-      type:         DataTypes.STRING,
-      defaultValue: "tunai", // tunai, qris, mayar
-    },
-    kurirId: {
-      type:         DataTypes.STRING,
-      allowNull:    true,
-    },
-    kurirName: {
-      type:         DataTypes.STRING,
-      allowNull:    true,
-    },
-    namaPenerima: {
-      type:         DataTypes.STRING,
-      allowNull:    true,
-    },
-    kendalaKirim: {
-      type:         DataTypes.TEXT,
-      allowNull:    true,
-    },
-    fotoBuktiKirim: {
-      type:         DataTypes.TEXT,
-      allowNull:    true,
-    },
-    waktuDiambil: {
-      type:         DataTypes.DATE,
-      allowNull:    true,
-    },
-    waktuDikirim: {
-      type:         DataTypes.DATE,
-      allowNull:    true,
-    },
-    waktuSelesai: {
-      type:         DataTypes.DATE,
-      allowNull:    true,
-    },
-    waktuKendala: {
-      type:         DataTypes.DATE,
-      allowNull:    true,
-    },
-  },
-  {
-    timestamps: true,
-    tableName:  "orders",
-  },
-);
+class Order {
+  static create({ ownerId, kasirId, kasirName, items, subtotal, diskon, total, bayar, kembalian, metodeBayar, type, status }) {
+    return new Promise((resolve, reject) => {
+      const sql = `
+        INSERT INTO orders (ownerId, kasirId, kasirName, items, subtotal, diskon, total, bayar, kembalian, metodeBayar, type, status, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `;
+      const itemsJson = JSON.stringify(items);
+      db.run(sql, [ownerId, kasirId, kasirName, itemsJson, subtotal, diskon, total, bayar, kembalian, metodeBayar, type, status || 'selesai'], function(err) {
+        if (err) return reject(err);
+        resolve({ id: this.lastID, ownerId, kasirId, kasirName, items, subtotal, diskon, total, bayar, kembalian, metodeBayar, type, status });
+      });
+    });
+  }
+
+  static findByOwnerId(ownerId, limit = 50) {
+    return new Promise((resolve, reject) => {
+      const sql = 'SELECT * FROM orders WHERE ownerId = ? ORDER BY createdAt DESC LIMIT ?';
+      db.all(sql, [ownerId, limit], (err, rows) => {
+        if (err) return reject(err);
+        resolve(rows.map(row => ({
+          ...row,
+          items: JSON.parse(row.items)
+        })));
+      });
+    });
+  }
+
+  static findTodayByOwnerId(ownerId) {
+    return new Promise((resolve, reject) => {
+      const sql = `
+        SELECT * FROM orders
+        WHERE ownerId = ? AND date(createdAt) = date('now')
+        ORDER BY createdAt DESC
+      `;
+      db.all(sql, [ownerId], (err, rows) => {
+        if (err) return reject(err);
+        return rows.map(row => ({
+          ...row,
+          items: JSON.parse(row.items)
+        }));
+      });
+    });
+  }
+
+  static getSummary() {
+    return new Promise((resolve, reject) => {
+      const sql = "SELECT COALESCE(SUM(total), 0) as total_omzet, COUNT(*) as total_orders FROM orders WHERE status = 'selesai'";
+      db.get(sql, [], (err, row) => {
+        if (err) return reject(err);
+        resolve(row);
+      });
+    });
+  }
+}
 
 module.exports = Order;

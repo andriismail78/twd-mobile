@@ -1,9 +1,29 @@
 // twd-backend/src/routes/orders.routes.js
 const express = require("express");
 const { Order } = require("../models");
-const { verifyToken } = require("../middleware/auth.middleware");
+const { verifyToken, requireRole } = require("../middleware/auth");
 
 const router = express.Router();
+
+/**
+ * GET /api/orders/summary (Hanya Super Admin)
+ * Menghitung total omzet dan jumlah transaksi dari semua toko
+ */
+router.get("/summary", verifyToken, requireRole('super_admin'), async (req, res) => {
+  try {
+    const summary = await Order.getSummary();
+    res.json({ 
+      status: "success", 
+      data: {
+        totalOmzet: summary.total_omzet || 0,
+        totalOrders: summary.total_orders || 0
+      }
+    });
+  } catch (err) {
+    console.error("Get summary error:", err);
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
 
 /**
  * GET /api/orders

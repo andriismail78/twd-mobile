@@ -1,73 +1,32 @@
 {
   "cli": {
-    "version": ">= 12.0.0"
+    "version": ">= 5.9.0",
+    "appVersionSource": "remote"
   },
   "build": {
-    "development": {
-      "developmentClient": true,
-      "distribution": "internal"
-    },
-    "preview": {
-      "distribution": "internal",
-      "channel": "preview",
-      "android": {
-        "buildType": "apk"
-      },
-      "env": {
-        "APP_TARGET": "super"
-      }
+    "owner": {
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_APP_TARGET": "owner" }
     },
     "marketing": {
-      "distribution": "internal",
-      "channel": "marketing",
-      "android": {
-        "buildType": "apk"
-      },
-      "env": {
-        "APP_TARGET": "marketing"
-      }
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_APP_TARGET": "marketing" }
+    },
+    "submarketing": {
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_APP_TARGET": "submarketing" }
     },
     "kurir": {
-      "distribution": "internal",
-      "channel": "kurir",
-      "android": {
-        "buildType": "apk"
-      },
-      "env": {
-        "APP_TARGET": "kurir"
-      }
-    },
-    "warung": {
-      "distribution": "internal",
-      "channel": "warung",
-      "android": {
-        "buildType": "apk"
-      },
-      "env": {
-        "APP_TARGET": "warung"
-      }
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_APP_TARGET": "kurir" }
     },
     "customer": {
-      "distribution": "internal",
-      "channel": "customer",
-      "android": {
-        "buildType": "apk"
-      },
-      "env": {
-        "APP_TARGET": "customer"
-      }
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_APP_TARGET": "customer" }
     },
-    "production": {
-      "channel": "production",
-      "android": {
-        "buildType": "app-bundle"
-      },
-      "env": {
-        "APP_TARGET": "super"
-      }
+    "superadmin": {
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_APP_TARGET": "super" }
     }
-  },
-  "submit": {
-    "production": {}
   }
 }

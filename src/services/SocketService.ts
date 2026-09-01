@@ -2,8 +2,6 @@
 // Layanan Sinkronisasi Real-Time Instan (Socket.IO + Intelligent Polling Fallback)
 // Memastikan data antar HP (HP 1, HP 2, Dasbor Super Admin) langsung berubah seketika tanpa refresh manual!
 
-import axios from "axios";
-import { API_BASE_URL } from "../config/api.config";
 
 type SyncListener = (event: "user:sync" | "order:sync" | "store:sync", data?: any) => void;
 const listeners: SyncListener[] = [];

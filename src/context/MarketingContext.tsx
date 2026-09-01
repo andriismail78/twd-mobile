@@ -1,10 +1,11 @@
 // src/context/MarketingContext.tsx
-// src/context/MarketingContext.tsx
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, { createContext, useContext, useEffect, useState } from "react";
-import { registerToCloud, syncUsersWithCloud } from "../services/CloudSyncService";
-import { subscribeToRealtimeSync } from "../services/SocketService";
+// v4 — FULLY ONLINE (No AsyncStorage Cache)
 
+import React, { createContext, useContext, useEffect, useState } from "react";
+import { Alert } from "react-native";
+import { API_BASE_URL } from "../config/api.config";
+import axiosClient from "../config/axiosClient";
+import { subscribeToRealtimeSync } from "../services/SocketService";
 
 export type MarketingRole  = "marketing" | "sub_marketing";
 export type KurirStatus    = "available" | "busy" | "offline";
@@ -148,11 +149,11 @@ interface MarketingContextType {
   ownerRegistrations: OwnerRegistration[];
   komisiRecords:      KomisiRecord[];
   deliveryRequests:   DeliveryRequest[];
-  addMarketing:    (data: Omit<MarketingAccount, "id" | "createdAt">) => void;
+  addMarketing:    (data: Omit<MarketingAccount, "id" | "createdAt">) => Promise<void>;
   updateMarketing: (id: string, data: Partial<MarketingAccount>)      => void;
   deleteMarketing: (id: string)                                        => void;
   loginMarketing:  (phone: string, pin: string) => MarketingAccount | null;
-  addKurir:    (data: Omit<KurirAccount, "id" | "createdAt">) => void;
+  addKurir:    (data: Omit<KurirAccount, "id" | "createdAt">) => Promise<void>;
   updateKurir: (id: string, data: Partial<KurirFullRegistration>)    => void;
   deleteKurir: (id: string)                                           => void;
   loginKurir:  (phone: string, pin: string) => KurirFullRegistration | null;
@@ -162,10 +163,10 @@ interface MarketingContextType {
   ) => KurirFullRegistration;
   addOwnerRegistration: (
     data: Omit<OwnerRegistration, "id" | "kodeToken" | "createdAt" | "totalTransaksi">
-  ) => OwnerRegistration;
+  ) => Promise<OwnerRegistration | null>;
   registerOwnerWithTrial: (
     data: Omit<OwnerRegistration, "id" | "kodeToken" | "createdAt" | "totalTransaksi" | "trialStartDate" | "trialEndDate">
-  ) => OwnerRegistration;
+  ) => Promise<OwnerRegistration | null>;
   deleteOwnerRegistration: (id: string)            => void;
   findOwnerByKode:         (kode: string)           => OwnerRegistration | null;
   updateOwnerTransaksi:    (ownerId: string, tambah: number) => void;
@@ -185,7 +186,6 @@ interface MarketingContextType {
   upgradePaket: (ownerId: string, paketBaru: PaketMkt) => void;
 }
 const MarketingContext = createContext<MarketingContextType | undefined>(undefined);
-const STORAGE_KEY = "mkt_data_v1";
 
 export function MarketingProvider({ children }: { children: React.ReactNode }) {
   const [marketingAccounts,  setMarketingAccounts]  = useState<MarketingAccount[]>([]);
@@ -204,236 +204,212 @@ export function MarketingProvider({ children }: { children: React.ReactNode }) {
     return () => unsubscribe();
   }, []);
 
+  // ─── LOAD DATA DARI SERVER (TANPA ASYNCSTORAGE) ──────────────────────────
   const loadData = async () => {
     try {
-      const [raw, rawMitra, rawOwners] = await Promise.all([
-        AsyncStorage.getItem(STORAGE_KEY),
-        AsyncStorage.getItem("@twd_marketing_accounts"),
-        AsyncStorage.getItem("@twd_owner_registrations"),
-      ]);
+      const res = await axiosClient.get(`/auth/users`);
+      const serverUsers = res.data.data || [];
 
-      const d = raw ? JSON.parse(raw) : {};
+      let mktAccounts: MarketingAccount[] = [];
+      let ownerRegs: OwnerRegistration[] = [];
+      let kurirAccs: KurirFullRegistration[] = [];
 
-      let mktAccounts: MarketingAccount[]     = d.marketingAccounts  ?? [];
-      let kurirAccs:   KurirFullRegistration[] = d.kurirAccounts      ?? [];
-      let ownerRegs:   OwnerRegistration[]     = d.ownerRegistrations ?? [];
-
-      // ── Merge mitra dari @twd_marketing_accounts (SuperAdmin) ─────────────
-      if (rawMitra) {
-        const mitraList: any[] = JSON.parse(rawMitra);
-        mitraList.forEach((m) => {
-          if (m.role === "kurir") {
-            if (!kurirAccs.find((k) => k.id === m.id || k.phone === m.phone)) {
-              kurirAccs = [
-                ...kurirAccs,
-                {
-                  id:           m.id,
-                  name:         m.name,
-                  phone:        m.phone,
-                  pin:          m.pin,
-                  wilayah:      m.wilayah   ?? "",
-                  status:       "available" as KurirStatus,
-                  createdAt:    m.createdAt ?? "",
-                  alamatRumah:  "",
-                  noKtp:        "",
-                  fotoKtp:      "",
-                  fotoSelfie:   "",
-                  registeredBy: "super_admin",
-                  verified:     false,
-                },
-              ];
-            }
-          } else if (m.role === "marketing" || m.role === "sub_marketing") {
-            if (!mktAccounts.find((a) => a.id === m.id || a.phone === m.phone)) {
-              mktAccounts = [
-                ...mktAccounts,
-                {
-                  id:        m.id,
-                  name:      m.name,
-                  phone:     m.phone,
-                  pin:       m.pin,
-                  role:      m.role as MarketingRole,
-                  createdAt: m.createdAt ?? "",
-                },
-              ];
-            }
-          }
-        });
-      }
-
-      // ── Merge owner dari @twd_owner_registrations (SuperAdmin) ────────────
-      if (rawOwners) {
-        const ownerList: any[] = JSON.parse(rawOwners);
-        ownerList.forEach((o) => {
-          if (!ownerRegs.find((r) => r.id === o.id)) {
-            ownerRegs = [
-              ...ownerRegs,
-              {
-                id:              o.id,
-                kodeToken:       o.kode ?? o.kodeToken ?? "",
-                name:            o.name      ?? "",
-                tokoName:        o.tokoName   ?? "",
-                phone:           o.phone      ?? "",
-                paket:           (o.paket ?? "basic") as PaketMkt,
-                recruitedBy:     "super_admin",
-                recruitedByRole: "marketing" as MarketingRole,
-                totalTransaksi:  0,
-                createdAt:       o.createdAt  ?? "",
-              },
-            ];
-          }
-        });
-      }
-
-      // ✅ Akun mitra & kurir dimuat murni dari server cloud / registrasi resmi tanpa seeder demo
-
-      // ✅ Sinkron ke server cloud VPS Biznet Gio agar HP 1 dan HP 2 selalu tersinkron
-      const cloudList = await syncUsersWithCloud([...mktAccounts, ...ownerRegs]);
-      if (cloudList && cloudList.length > 0) {
-        for (const cu of cloudList) {
-          if ((cu.role === "marketing" || cu.role === "sub_marketing") && !mktAccounts.find(x => x.id === cu.id || x.phone === cu.phone)) {
-            mktAccounts.push({
-              id: cu.id, name: cu.name, phone: cu.phone, pin: cu.pin || "123456",
-              role: cu.role, wilayah: "", createdAt: cu.createdAt || new Date().toISOString(),
-            });
-          } else if (cu.role === "owner" && !ownerRegs.find(o => o.id === cu.id || o.phone === cu.phone)) {
-            ownerRegs.push({
-              id: cu.id, name: cu.name, tokoName: cu.tokoName || `Toko ${cu.name}`,
-              phone: cu.phone, paket: "basic", recruitedBy: cu.recruitedBy || "super_admin",
-              recruitedByRole: "marketing", kodeToken: cu.kode || `TWD-${cu.id.slice(-6)}`,
-              createdAt: cu.createdAt || new Date().toISOString(), totalTransaksi: 0,
-            });
-          }
+      serverUsers.forEach((u: any) => {
+        if (u.role === "marketing" || u.role === "sub_marketing") {
+          mktAccounts.push({
+            id: String(u.id),
+            name: u.name,
+            phone: u.phone,
+            pin: "", // PIN tidak diambil dari server untuk alasan keamanan
+            role: u.role,
+            createdAt: u.createdat || new Date().toISOString(),
+          });
+        } else if (u.role === "kurir") {
+          kurirAccs.push({
+            id: String(u.id),
+            name: u.name,
+            phone: u.phone,
+            pin: "",
+            wilayah: "",
+            status: "available",
+            createdAt: u.createdat || new Date().toISOString(),
+            alamatRumah: "",
+            noKtp: "",
+            fotoKtp: "",
+            fotoSelfie: "",
+            registeredBy: "",
+            verified: false,
+          });
+        } else if (u.role === "owner") {
+          ownerRegs.push({
+            id: String(u.id),
+            kodeToken: u.kodetoken,
+            name: u.name,
+            tokoName: `Toko ${u.name}`,
+            phone: u.phone,
+            paket: u.paket || "basic",
+            recruitedBy: "system",
+            recruitedByRole: "marketing",
+            totalTransaksi: 0,
+            createdAt: u.createdat || new Date().toISOString(),
+          });
         }
-      }
+      });
 
       setMarketingAccounts(mktAccounts);
       setKurirAccounts(kurirAccs);
       setOwnerRegistrations(ownerRegs);
-      setKomisiRecords(d.komisiRecords     ?? []);
-      setDeliveryRequests(d.deliveryRequests ?? []);
-    } catch (e) {
-      console.error(e);
+      
+      // Untuk komisi & delivery, saat ini belum ada route API khusus, biarkan kosong
+      // agar tidak menampilkan data fiktif.
+      setKomisiRecords([]);
+      setDeliveryRequests([]);
+
+    } catch (error) {
+      console.error("Gagal memuat data dari server (offline):", error);
+      // Sesuai permintaan: Jika offline, jangan muat data lokal (biarkan kosong)
+      setMarketingAccounts([]);
+      setKurirAccounts([]);
+      setOwnerRegistrations([]);
+      setKomisiRecords([]);
+      setDeliveryRequests([]);
     }
   };
 
-  const persist = (patch: Record<string, unknown>) => {
-    const data = {
-      marketingAccounts, kurirAccounts, ownerRegistrations,
-      komisiRecords, deliveryRequests, ...patch,
-    };
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  // Helper untuk update state (Tanpa AsyncStorage)
+  const updateState = (setter: any, newData: any) => setter(newData);
+
+  // ─── FUNGSI ONLINE: DAFTAR MARKETING ───────────────────────────────
+  const addMarketing = async (data: Omit<MarketingAccount, "id" | "createdAt">) => {
+    try {
+      const res = await axiosClient.post(`/auth/register`, {
+        name: data.name,
+        phone: data.phone,
+        pin: data.pin,
+        role: data.role,
+      });
+
+      const newAcc = {
+        ...data,
+        id: res.data.owner.id,
+        createdAt: res.data.owner.createdAt || new Date().toISOString(),
+      };
+      updateState(setMarketingAccounts, [...marketingAccounts, newAcc]);
+    } catch (err: any) {
+      Alert.alert("Gagal Daftar", err.response?.data?.error || "Gagal terhubung ke server");
+    }
   };
 
-  const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const ts    = () => new Date().toISOString();
-
-  const addMarketing = (data: Omit<MarketingAccount, "id" | "createdAt">) => {
-    const id = genId();
-    const newAcc = { ...data, id, createdAt: ts() };
-    const upd = [...marketingAccounts, newAcc];
-    setMarketingAccounts(upd); persist({ marketingAccounts: upd });
-    registerToCloud({ ...newAcc, role: data.role }).catch(() => {});
-  };
   const updateMarketing = (id: string, data: Partial<MarketingAccount>) => {
     const upd = marketingAccounts.map(m => m.id === id ? { ...m, ...data } : m);
-    setMarketingAccounts(upd); persist({ marketingAccounts: upd });
+    updateState(setMarketingAccounts, upd);
   };
   const deleteMarketing = (id: string) => {
     const upd = marketingAccounts.filter(m => m.id !== id);
-    setMarketingAccounts(upd); persist({ marketingAccounts: upd });
+    updateState(setMarketingAccounts, upd);
   };
   const loginMarketing = (phone: string, pin: string): MarketingAccount | null =>
     marketingAccounts.find(m => m.phone === phone && m.pin === pin) ?? null;
 
-  const addKurir = (data: Omit<KurirAccount, "id" | "createdAt">) => {
-    const newKurir: KurirFullRegistration = {
-      ...data,
-      id:           genId(),
-      createdAt:    ts(),
-      alamatRumah:  "",
-      noKtp:        "",
-      fotoKtp:      "",
-      fotoSelfie:   "",
-      registeredBy: "",
-      verified:     false,
-    };
-    const upd = [...kurirAccounts, newKurir];
-    setKurirAccounts(upd); persist({ kurirAccounts: upd });
+  // ─── FUNGSI ONLINE: DAFTAR KURIR ───────────────────────────────────
+  const addKurir = async (data: Omit<KurirAccount, "id" | "createdAt">) => {
+    try {
+      const res = await axiosClient.post(`/auth/register`, {
+        name: data.name,
+        phone: data.phone,
+        pin: data.pin,
+        role: "kurir",
+      });
+
+      const newKurir: KurirFullRegistration = {
+        ...data,
+        id:           res.data.owner.id,
+        createdAt:    new Date().toISOString(),
+        alamatRumah:  "",
+        noKtp:        "",
+        fotoKtp:      "",
+        fotoSelfie:   "",
+        registeredBy: "",
+        verified:     false,
+      };
+      updateState(setKurirAccounts, [...kurirAccounts, newKurir]);
+    } catch (err: any) {
+      Alert.alert("Gagal Daftar", err.response?.data?.error || "Gagal terhubung ke server");
+    }
   };
+
   const updateKurir = (id: string, data: Partial<KurirFullRegistration>) => {
     const upd = kurirAccounts.map(k => k.id === id ? { ...k, ...data } : k);
-    setKurirAccounts(upd); persist({ kurirAccounts: upd });
+    updateState(setKurirAccounts, upd);
   };
   const deleteKurir = (id: string) => {
     const upd = kurirAccounts.filter(k => k.id !== id);
-    setKurirAccounts(upd); persist({ kurirAccounts: upd });
+    updateState(setKurirAccounts, upd);
   };
   const loginKurir = (phone: string, pin: string): KurirFullRegistration | null =>
     kurirAccounts.find(k => k.phone === phone && k.pin === pin) ?? null;
   const updateKurirStatus = (kurirId: string, status: KurirStatus) => {
     const upd = kurirAccounts.map(k => k.id === kurirId ? { ...k, status } : k);
-    setKurirAccounts(upd); persist({ kurirAccounts: upd });
+    updateState(setKurirAccounts, upd);
   };
   const registerKurir = (
     data: Omit<KurirFullRegistration, "id" | "createdAt" | "pin" | "status">,
   ): KurirFullRegistration => {
+    // Fallback lokal jika dipanggil tanpa async
     const newKurir: KurirFullRegistration = {
       ...data,
-      id:        genId(),
-      createdAt: ts(),
+      id:        Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      createdAt: new Date().toISOString(),
       pin:       "",
       status:    "available",
       verified:  false,
     };
-    const upd = [...kurirAccounts, newKurir];
-    setKurirAccounts(upd); persist({ kurirAccounts: upd });
+    updateState(setKurirAccounts, [...kurirAccounts, newKurir]);
     return newKurir;
   };
 
-  const addOwnerRegistration = (
-    data: Omit<OwnerRegistration, "id" | "kodeToken" | "createdAt" | "totalTransaksi">,
-  ): OwnerRegistration => {
-    const newRec: OwnerRegistration = {
-      ...data,
-      id:             genId(),
-      kodeToken:      generateKodeToko(),
-      totalTransaksi: 0,
-      createdAt:      ts(),
-    };
-    const upd = [...ownerRegistrations, newRec];
-    setOwnerRegistrations(upd); persist({ ownerRegistrations: upd });
-    return newRec;
-  };
-  const registerOwnerWithTrial = (
+  // ─── FUNGSI ONLINE: DAFTAR OWNER (DENGAN TRIAL) ─────────────────────────
+  const registerOwnerWithTrial = async (
     data: Omit<OwnerRegistration, "id" | "kodeToken" | "createdAt" | "totalTransaksi" | "trialStartDate" | "trialEndDate">,
-  ): OwnerRegistration => {
-    const now      = new Date();
-    const trialEnd = new Date(now.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
-    const newRec: OwnerRegistration = {
-      ...data,
-      id:             genId(),
-      kodeToken:      generateKodeToko(),
-      totalTransaksi: 0,
-      createdAt:      now.toISOString(),
-      trialStartDate: now.toISOString(),
-      trialEndDate:   trialEnd.toISOString(),
-    };
-    const upd = [...ownerRegistrations, newRec];
-    setOwnerRegistrations(upd); persist({ ownerRegistrations: upd });
-    registerToCloud({
-      name: newRec.name,
-      phone: newRec.phone,
-      role: "owner",
-      tokoName: newRec.tokoName,
-      kodeToken: newRec.kodeToken,
-      ownerId: newRec.id,
-    }).catch(() => {});
-    return newRec;
+  ): Promise<OwnerRegistration | null> => {
+    try {
+      const res = await axiosClient.post(`/auth/register`, {
+        name: data.name,
+        phone: data.phone,
+        pin: "123456", // Default PIN Owner pertama kali
+        role: "owner",
+      });
+
+      const now      = new Date();
+      const trialEnd = new Date(now.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+      
+      const newRec: OwnerRegistration = {
+        ...data,
+        id:             res.data.owner.id,
+        kodeToken:      res.data.owner.kodeToken,
+        totalTransaksi: 0,
+        createdAt:      now.toISOString(),
+        trialStartDate: now.toISOString(),
+        trialEndDate:   trialEnd.toISOString(),
+      };
+      
+      updateState(setOwnerRegistrations, [...ownerRegistrations, newRec]);
+      return newRec;
+    } catch (err: any) {
+      Alert.alert("Gagal Daftar Owner", err.response?.data?.error || "Gagal terhubung ke server");
+      return null;
+    }
   };
+
+  const addOwnerRegistration = async (
+    data: Omit<OwnerRegistration, "id" | "kodeToken" | "createdAt" | "totalTransaksi">,
+  ): Promise<OwnerRegistration | null> => {
+    return registerOwnerWithTrial(data as any);
+  };
+
   const deleteOwnerRegistration = (id: string) => {
     const upd = ownerRegistrations.filter(o => o.id !== id);
-    setOwnerRegistrations(upd); persist({ ownerRegistrations: upd });
+    updateState(setOwnerRegistrations, upd);
   };
   const findOwnerByKode = (kode: string): OwnerRegistration | null =>
     ownerRegistrations.find(o =>
@@ -443,7 +419,7 @@ export function MarketingProvider({ children }: { children: React.ReactNode }) {
     const upd = ownerRegistrations.map(o =>
       o.id === ownerId ? { ...o, totalTransaksi: (o.totalTransaksi ?? 0) + tambah } : o,
     );
-    setOwnerRegistrations(upd); persist({ ownerRegistrations: upd });
+    updateState(setOwnerRegistrations, upd);
   };
   const getTrialStatus = (ownerId: string): TrialStatus => {
     const owner = ownerRegistrations.find(o => o.id === ownerId);
@@ -458,25 +434,25 @@ export function MarketingProvider({ children }: { children: React.ReactNode }) {
   };
 
   const addKomisiRecord = (data: Omit<KomisiRecord, "id">) => {
-    const upd = [...komisiRecords, { ...data, id: genId() }];
-    setKomisiRecords(upd); persist({ komisiRecords: upd });
+    const upd = [...komisiRecords, { ...data, id: Date.now().toString() }];
+    updateState(setKomisiRecords, upd);
   };
   const addDeliveryRequest = (data: Omit<DeliveryRequest, "id" | "createdAt">) => {
     const biaya = data.jarakKm != null ? hitungBiayaKurir(data.jarakKm) : undefined;
-    const upd = [...deliveryRequests, { ...data, biayaKurir: biaya, id: genId(), createdAt: ts() }];
-    setDeliveryRequests(upd); persist({ deliveryRequests: upd });
+    const upd = [...deliveryRequests, { ...data, biayaKurir: biaya, id: Date.now().toString(), createdAt: new Date().toISOString() }];
+    updateState(setDeliveryRequests, upd);
   };
   const assignKurir = (requestId: string, kurirId: string, kurirName: string) => {
     const upd = deliveryRequests.map(r =>
       r.id === requestId ? { ...r, kurirId, kurirName, status: "assigned" as DeliveryStatus } : r,
     );
-    setDeliveryRequests(upd); persist({ deliveryRequests: upd });
+    updateState(setDeliveryRequests, upd);
   };
   const updateDeliveryStatus = (requestId: string, status: DeliveryStatus) => {
     const upd = deliveryRequests.map(r =>
       r.id === requestId ? { ...r, status } : r,
     );
-    setDeliveryRequests(upd); persist({ deliveryRequests: upd });
+    updateState(setDeliveryRequests, upd);
   };
 
   const getSubMarketing          = (mktId: string) =>
@@ -503,7 +479,7 @@ export function MarketingProvider({ children }: { children: React.ReactNode }) {
     const upd = ownerRegistrations.map(o =>
       o.id === ownerId ? { ...o, paket: paketBaru } : o,
     );
-    setOwnerRegistrations(upd); persist({ ownerRegistrations: upd });
+    updateState(setOwnerRegistrations, upd);
   };
   const getKomisiLayananMarketing = (marketingId: string): number => {
     const allOwners = getAllOwnersByMarketing(marketingId);
